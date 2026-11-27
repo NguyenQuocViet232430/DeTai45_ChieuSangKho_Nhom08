@@ -1,0 +1,1138 @@
+[
+  {
+    "id": "dt45-week45",
+    "type": "tab",
+    "label": "DT45 - Nhom08 - He thong hoan chinh",
+    "disabled": false,
+    "info": "Du 4 tang: 3 PIR -> ESP32 -> MQTT -> Node-RED -> Web Dashboard /dashboard. Rule mac dinh TAT. Dashboard can ma dieu khien trong terminal. Watchdog bao offline/ACK timeout. Khong gui lenh khi Deploy."
+  },
+  {
+    "id": "intro",
+    "type": "comment",
+    "z": "dt45-week45",
+    "name": "1. Telemetry, trang thai, nhat ky",
+    "x": 250,
+    "y": 40,
+    "info": "Debug hien trang thai that tu ESP32. File log: node-red/logs/events.jsonl (duong dan tuy bien qua DT45_LOG_FILE).",
+    "wires": []
+  },
+  {
+    "id": "telemetry",
+    "type": "mqtt in",
+    "z": "dt45-week45",
+    "name": "Nhan telemetry",
+    "x": 140,
+    "y": 100,
+    "topic": "iot/nhom08/detai45/kho-c7e2/telemetry",
+    "qos": "1",
+    "datatype": "utf8",
+    "broker": "dt45-emqx",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "wires": [
+      [
+        "parse"
+      ]
+    ]
+  },
+  {
+    "id": "parse",
+    "type": "json",
+    "z": "dt45-week45",
+    "name": "JSON -> object",
+    "x": 350,
+    "y": 100,
+    "property": "payload",
+    "action": "obj",
+    "pretty": false,
+    "wires": [
+      [
+        "validate"
+      ]
+    ]
+  },
+  {
+    "id": "catch-telemetry-json",
+    "type": "catch",
+    "z": "dt45-week45",
+    "name": "Telemetry JSON sai -> khoa lenh",
+    "x": 350,
+    "y": 145,
+    "scope": [
+      "parse"
+    ],
+    "uncaught": false,
+    "wires": [
+      [
+        "validate"
+      ]
+    ]
+  },
+  {
+    "id": "validate",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Kiem tra + tong hop 3 vung",
+    "x": 600,
+    "y": 100,
+    "func": "const configuredLiveMs = Number(env.get(\"DT45_LIVE_WINDOW_MS\"));  /// Biến môi trường DT45_LIVE_WINDOW_MS (nếu có) để đổi cửa sổ 'dữ liệu trực tiếp'.\n// Wokwi thuong chay cham hon thoi gian thuc (15-60%): heartbeat 2s mo phong co the cach nhau 5-13s thuc.\nconst LIVE_WINDOW_MS = Number.isInteger(configuredLiveMs) && configuredLiveMs >= 3000 ? configuredLiveMs : 15000;  /// Cửa sổ dữ liệu trực tiếp: hợp lệ nếu là số nguyên ≥ 3000 ms, nếu không dùng mặc định 15 000 ms.\nconst p = msg.payload;  /// Telemetry đã được node JSON chuyển thành đối tượng.\nconst ids = new Set(Array.isArray(p?.zones) ? p.zones.map(z => z?.id) : []);  /// Tập các id vùng có trong bản tin.\nconst hasUsage = p && (p.session_ms !== undefined || (Array.isArray(p.zones) && p.zones.some(z => z?.on_ms !== undefined)));  /// Bản tin có số liệu thời gian sáng không (firmware mới).\nconst usageValid = !hasUsage || (Number.isSafeInteger(p.session_ms) && p.session_ms >= 0 &&  /// Nếu có: session_ms là số nguyên không âm,\n  p.session_ms <= Number.MAX_SAFE_INTEGER / 3 && Array.isArray(p.zones) &&  /// không quá lớn, có mảng zones,\n  p.zones.every(z => Number.isSafeInteger(z?.on_ms) && z.on_ms >= 0 && z.on_ms <= p.session_ms));  /// và mỗi on_ms là số nguyên trong khoảng 0..session_ms.\nif (!p || typeof p.device !== \"string\" || !Number.isInteger(p.uptime_ms) ||  /// KIỂM TRA CẤU TRÚC: device là chuỗi, uptime_ms là số nguyên\n    p.uptime_ms < 0 || p.uptime_ms > 4294967295 || !Number.isInteger(p.timeout_ms) ||  /// trong phạm vi 32 bit, timeout_ms là số nguyên\n    p.timeout_ms <= 0 || p.timeout_ms > 4294967295 || !Array.isArray(p.zones) ||  /// dương, zones là mảng\n    p.zones.length !== 3 || ids.size !== 3 || ![1,2,3].every(id => ids.has(id)) ||  /// đúng 3 phần tử, id 1, 2, 3 không trùng,\n    !p.zones.every(z => z && (z.pir === 0 || z.pir === 1) && typeof z.motion === \"boolean\" &&  /// pir là 0/1, motion là boolean,\n      typeof z.led === \"boolean\" && [\"AUTO\",\"MANUAL\"].includes(z.mode)) || !usageValid ||  /// led là boolean, mode là AUTO/MANUAL, số liệu thời gian sáng hợp lệ,\n    (p.prelight_enabled !== undefined && typeof p.prelight_enabled !== \"boolean\")) {  /// prelight_enabled (nếu có) là boolean.\n  node.warn(\"Telemetry sai schema; khong chay rule.\");  /// Sai cấu trúc → cảnh báo,\n  flow.set(\"ruleBegin\", null);  /// hủy đếm kho vắng,\n  flow.set(\"invalidTelemetry\", true);  /// đánh dấu dữ liệu sai → command.js khóa mọi lệnh,\n  flow.set(\"pirHighSince\", {});  /// xóa bộ đếm PIR HIGH,\n  flow.set(\"manualIdleSince\",null);  /// xóa bộ đếm đèn bật tay khi vắng,\n  return [null, {topic:msg.topic,payload:{type:\"validation_error\"}}];  /// chỉ ghi nhật ký validation_error, không chạy rule.\n}\nmsg.live = msg.retain !== true;  /// Bản tin trực tiếp (không phải retained cũ broker lưu lại).\nif (msg.live) {  /// Chỉ dữ liệu trực tiếp mới được cập nhật trạng thái 'online':\n  const now = Date.now(), previousAt = flow.get(\"lastTelemetryAt\"), previousUptime = flow.get(\"sensorUptime\");  /// thời điểm hiện tại, lần trước và uptime lần trước,\n  const reset = previousAt == null || now-previousAt > LIVE_WINDOW_MS || previousUptime == null || p.uptime_ms < previousUptime ||  /// phát hiện gián đoạn: lần đầu, mất dữ liệu quá 15 s, uptime giảm (ESP32 khởi động lại)\n    p.device !== flow.get(\"sensorDevice\");  /// hoặc đổi thiết bị →\n  if (reset) {  /// đặt lại mọi bộ đếm của rule và cảnh báo để không tính nhầm thời gian lúc mất kết nối.\n    flow.set(\"ruleBegin\",null);\n    flow.set(\"ruleFired\",false);\n    flow.set(\"manualIdleSince\",null);\n    flow.set(\"manualIdleAlert\",false);\n    flow.set(\"afterHoursAlert\",false);\n    flow.set(\"sensorAlerts\",{});\n  }\n  const highSince = reset ? {} : (flow.get(\"pirHighSince\") || {});  /// Mốc PIR bắt đầu HIGH của từng vùng.\n  for (const z of p.zones) {  /// Từng vùng:\n    if (z.pir === 1) { if (highSince[z.id] == null) highSince[z.id] = now; }  /// PIR HIGH → ghi mốc nếu chưa có (monitor.js dùng để cảnh báo PIR HIGH quá 120 s),\n    else delete highSince[z.id];  /// PIR LOW → xóa mốc.\n  }\n  flow.set(\"pirHighSince\",highSince);  /// Lưu mốc,\n  flow.set(\"sensorUptime\",p.uptime_ms);  /// uptime,\n  flow.set(\"sensorDevice\",p.device);  /// và ID thiết bị.\n  const idleManual = p.zones.every(z => z.pir === 0 && !z.motion) && p.zones.some(z => z.mode === \"MANUAL\" && z.led);  /// Kho vắng (cả 3 PIR = 0, không chuyển động) mà vẫn có đèn bật tay?\n  if (!idleManual) flow.set(\"manualIdleSince\",null);  /// Không → xóa mốc.\n  else if (flow.get(\"manualIdleSince\") == null) flow.set(\"manualIdleSince\",now);  /// Có → ghi mốc bắt đầu nếu chưa có (cảnh báo MANUAL_LIGHT_IDLE).\n  flow.set(\"lastTelemetryAt\", Date.now());  /// Thời điểm nhận telemetry trực tiếp.\n  flow.set(\"lastSeenAt\", Date.now());  /// Lần thấy thiết bị.\n  flow.set(\"deviceOnline\", true);  /// Thiết bị online.\n  flow.set(\"connectionReason\", \"live\");  /// Lý do: live.\n  flow.set(\"invalidTelemetry\", false);  /// Dữ liệu hợp lệ → mở khóa điều khiển.\n  const samples = flow.get(\"samples\") || [];  /// Mẫu cho biểu đồ 'Hoạt động gần đây':\n  samples.push({at:Date.now(),motion:p.zones.filter(z=>z.motion).length,lights:p.zones.filter(z=>z.led).length});  /// số vùng có chuyển động và số đèn sáng tại thời điểm này,\n  flow.set(\"samples\",samples.slice(-60));  /// chỉ giữ 60 mẫu gần nhất.\n}\n// Khong cho retained den tre ghi de du lieu live dang hien thi.\nif (msg.live || !flow.get(\"telemetry\")) {  /// Cập nhật telemetry hiển thị (retained chỉ dùng khi chưa có gì).\n  flow.set(\"telemetry\",p);  /// Lưu telemetry,\n  flow.set(\"telemetrySource\",msg.live ? \"live\" : \"retained\");  /// và nguồn.\n}\n// Bo dem thoi gian thay doi moi heartbeat, khong ghi event state lien tuc vi bo dem.\nconst signature = JSON.stringify({device:p.device,timeout_ms:p.timeout_ms,prelight_enabled:p.prelight_enabled,  /// 'Chữ ký' trạng thái: mọi thứ trừ on_ms (on_ms tăng mỗi heartbeat nên không dùng để so sánh).\n  zones:p.zones.map(({on_ms,...z}) => z)});  /// Loại on_ms khỏi từng vùng.\nlet event = null;  /// Sự kiện state chỉ tạo khi trạng thái thực sự đổi.\nif (signature !== flow.get(\"lastState\")) {  /// Khác lần trước →\n  flow.set(\"lastState\", signature);  /// lưu chữ ký mới,\n  event = {topic:msg.topic,payload:{type:\"state\",source:msg.live ? \"live\" : \"retained\",...p}};  /// tạo sự kiện state đầy đủ cho nhật ký.\n}\nnode.status({fill:msg.live ? \"green\" : \"grey\",shape:\"dot\",  /// Trạng thái dưới node trong editor,\n  text:p.zones.map(z => `Z${z.id}:${z.led ? \"ON\" : \"OFF\"}/${z.mode}`).join(\" \")});  /// ví dụ Z1:ON/AUTO Z2:OFF/AUTO Z3:OFF/MANUAL.\nreturn [msg,event];  /// Cổng 1 → debug, rule.js, db-telemetry (CSDL); cổng 2 → history (chỉ khi trạng thái đổi).\n/// ▲ validate.js: 'người gác cổng' dữ liệu – chỉ telemetry đúng cấu trúc và trực tiếp mới được tin cậy.\n///   Đây cũng là nơi phát hiện ESP32 khởi động lại (uptime giảm) để đặt lại các bộ đếm thời gian.\n",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "state-debug",
+        "rule",
+        "db-telemetry"
+      ],
+      [
+        "history"
+      ]
+    ]
+  },
+  {
+    "id": "state-debug",
+    "type": "debug",
+    "z": "dt45-week45",
+    "name": "TRANG THAI 3 VUNG",
+    "x": 900,
+    "y": 60,
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "wires": []
+  },
+  {
+    "id": "status-in",
+    "type": "mqtt in",
+    "z": "dt45-week45",
+    "name": "Online / offline",
+    "x": 140,
+    "y": 180,
+    "topic": "iot/nhom08/detai45/kho-c7e2/status",
+    "qos": "1",
+    "datatype": "utf8",
+    "broker": "dt45-emqx",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "wires": [
+      [
+        "status"
+      ]
+    ]
+  },
+  {
+    "id": "status",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Xu ly trang thai ket noi",
+    "x": 600,
+    "y": 180,
+    "func": "const value = String(msg.payload).trim();  /// Bản tin topic status: online (ESP32 gửi khi kết nối) hoặc offline (LWT do broker gửi).\nif (![\"online\",\"offline\"].includes(value)) return null;  /// Giá trị khác → bỏ qua.\nconst previous = flow.get(\"brokerDeviceStatus\");  /// Trạng thái trước đó.\nflow.set(\"brokerDeviceStatus\",value);  /// Lưu trạng thái mới.\n// 'online' retained chua du: can telemetry live truoc khi gui lenh.\nif (value === \"offline\") {  /// offline (LWT) → coi thiết bị mất kết nối ngay, không chờ hết 15 s:\n  flow.set(\"deviceOnline\", false);  /// đánh dấu offline,\n  flow.set(\"connectionReason\", \"last_will\");  /// lý do: last_will,\n  flow.set(\"lastTelemetryAt\", null);  /// xóa mốc telemetry → khóa điều khiển,\n  flow.set(\"ruleBegin\", null);  /// hủy đếm kho vắng,\n  flow.set(\"ruleFired\", false);  /// cho phép rule chạy lại,\n  flow.set(\"ruleLastAt\", null);  /// xóa mốc lần chạy rule.\n}\nnode.status({fill:value === \"online\" ? \"green\" : \"red\",shape:\"dot\",text:value});  /// Chấm xanh/đỏ dưới node trong editor Node-RED.\nif (previous === value) return null;  /// Không đổi → không ghi nhật ký lặp.\nreturn {topic:msg.topic,payload:{type:\"connection\",status:value,retained:msg.retain === true}};  /// Ghi sự kiện connection (retained=true nghĩa là bản tin cũ broker lưu lại).\n/// ▲ status.js: xử lý online/offline; LWT 'offline' giúp phát hiện ESP32 rớt mạng mà không cần đợi hết 15 s.\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "history"
+      ]
+    ]
+  },
+  {
+    "id": "event-in",
+    "type": "mqtt in",
+    "z": "dt45-week45",
+    "name": "Phan hoi lenh tu ESP32",
+    "x": 140,
+    "y": 240,
+    "topic": "iot/nhom08/detai45/kho-c7e2/event",
+    "qos": "1",
+    "datatype": "utf8",
+    "broker": "dt45-emqx",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "wires": [
+      [
+        "history"
+      ]
+    ]
+  },
+  {
+    "id": "rule-comment",
+    "type": "comment",
+    "z": "dt45-week45",
+    "name": "2. Rule: MANUAL ON + vang -> AUTO",
+    "x": 350,
+    "y": 320,
+    "info": "Mac dinh TAT, 30s; dashboard cho doi 15-300s. Chi tinh voi telemetry LIVE, ca 3 PIR=0 va motion=false, co den MANUAL ON. AUTO dua CA 3 vung ve tu dong, ke ca vung MANUAL OFF. Gui 1 lan moi dot; device giu den dang sang theo timeout hien tai (mac dinh 10s).",
+    "wires": []
+  },
+  {
+    "id": "rule",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Rule tiet kiem dien",
+    "x": 900,
+    "y": 180,
+    "func": "const configuredLiveMs = Number(env.get(\"DT45_LIVE_WINDOW_MS\"));  /// Biến môi trường DT45_LIVE_WINDOW_MS (nếu có) để đổi cửa sổ 'dữ liệu trực tiếp'.\n// Wokwi thuong chay cham hon thoi gian thuc (15-60%): heartbeat 2s mo phong co the cach nhau 5-13s thuc.\nconst LIVE_WINDOW_MS = Number.isInteger(configuredLiveMs) && configuredLiveMs >= 3000 ? configuredLiveMs : 15000;  /// Cửa sổ dữ liệu trực tiếp: hợp lệ nếu là số nguyên ≥ 3000 ms, nếu không dùng mặc định 15 000 ms.\nif (msg.kind === \"rule_config\") {  /// Lệnh cấu hình rule (từ dashboard hoặc Inject BAT/TAT rule):\n  const enabled = msg.payload === true;  /// bật hay tắt,\n  const idleSeconds = msg.idleSeconds === undefined ? (flow.get(\"ruleIdleSeconds\") || 30) : msg.idleSeconds;  /// ngưỡng kho vắng mới, hoặc giữ ngưỡng cũ (mặc định 30 s),\n  if (!Number.isInteger(idleSeconds) || idleSeconds < 15 || idleSeconds > 300) {  /// chỉ nhận 15–300 giây,\n    return [null,null,msg.req ? {...msg,statusCode:400,payload:{accepted:false,reason:\"invalid_idle_seconds\"}} : null];  /// sai → HTTP 400.\n  }\n  flow.set(\"ruleEnabled\", enabled);  /// Lưu trạng thái bật/tắt.\n  flow.set(\"ruleIdleSeconds\",idleSeconds);  /// Lưu ngưỡng.\n  flow.set(\"ruleBegin\", null);  /// Bắt đầu đếm lại từ đầu.\n  flow.set(\"ruleFired\", false);  /// Cho phép gửi AUTO ở đợt mới.\n  node.status({fill:enabled ? \"blue\" : \"grey\",shape:\"dot\",text:enabled ? `BAT: ${idleSeconds}s` : \"TAT\"});  /// Hiển thị BAT: 30s / TAT dưới node.\n  return [null,{payload:{type:\"rule_config\",enabled,idle_seconds:idleSeconds}},  /// Ghi nhật ký rule_config,\n    msg.req ? {...msg,statusCode:200,headers:{\"Content-Type\":\"application/json\",\"Cache-Control\":\"no-store\"},payload:{accepted:true,enabled,idle_seconds:idleSeconds}} : null];  /// và trả HTTP 200 nếu cấu hình đến từ dashboard.\n}\nif (!msg.live || !flow.get(\"ruleEnabled\")) return null;  /// Chỉ xét telemetry TRỰC TIẾP và khi rule đang bật (mặc định TẮT).\nconst now = Date.now(), p = msg.payload;  /// Thời điểm và telemetry.\nconst previousAt = flow.get(\"ruleLastAt\"), previousUptime = flow.get(\"ruleLastUptime\");  /// Lần xét trước và uptime lúc đó.\nif (previousAt == null || now - previousAt > LIVE_WINDOW_MS ||  /// Gián đoạn dữ liệu quá 15 s\n    previousUptime == null || p.uptime_ms < previousUptime) {  /// hoặc ESP32 khởi động lại (uptime giảm) →\n  flow.set(\"ruleBegin\", null);  /// hủy đợt đếm,\n  flow.set(\"ruleFired\", false);  /// cho phép gửi lại.\n}\nflow.set(\"ruleLastAt\", now);  /// Ghi mốc lần xét.\nflow.set(\"ruleLastUptime\", p.uptime_ms);  /// Ghi uptime.\nconst noPresence = p.zones.every(z => z.pir === 0 && !z.motion);  /// Kho vắng: cả 3 PIR = 0 và không vùng nào có chuyển động hợp lệ.\nconst manualLight = p.zones.some(z => z.mode === \"MANUAL\" && z.led);  /// Có ít nhất một đèn đang bật THỦ CÔNG.\nif (!noPresence || !manualLight || !flow.get(\"deviceOnline\")) {  /// Không thỏa (có người, hoặc không có đèn bật tay, hoặc offline) →\n  flow.set(\"ruleBegin\", null);  /// hủy đợt đếm,\n  flow.set(\"ruleFired\", false);\n  return null;  /// không làm gì.\n}\nlet begin = flow.get(\"ruleBegin\");  /// Đủ điều kiện:\nif (begin == null) { begin = now; flow.set(\"ruleBegin\", begin); }  /// bắt đầu đếm nếu chưa đếm.\nconst idleMs = (flow.get(\"ruleIdleSeconds\") || 30)*1000;  /// Ngưỡng tính bằng ms.\nif (now - begin < idleMs || flow.get(\"ruleFired\")) return null;  /// Chưa đủ thời gian, hoặc đợt này đã gửi AUTO rồi → chờ.\nflow.set(\"ruleFired\", true);  /// Đánh dấu đã gửi (mỗi đợt kho vắng chỉ gửi 1 lần).\nnode.status({fill:\"yellow\",shape:\"dot\",text:`Vang ${idleMs/1000}s: gui AUTO`});  /// Hiển thị dưới node.\nreturn [{payload:\"AUTO\",automatic:true},  /// Cổng 1 → command.js: AUTO với cờ automatic (không hủy đợt đếm).\n  {topic:msg.topic,payload:{type:\"automation\",rule:\"idle_manual_on\",idle_seconds:idleMs/1000,command:\"AUTO\",device:p.device}},null];  /// Cổng 2 → nhật ký sự kiện automation; cổng 3 (HTTP) không dùng.\n  /// ▲ rule.js: LUẬT TỰ ĐỘNG thứ 2 (chạy ở Node-RED): có đèn bật tay + kho vắng liên tục đủ ngưỡng → gửi AUTO cho cả 3 vùng,\n  ///   tránh quên tắt đèn. Luật thứ 1 (đèn theo PIR, giữ 10 s) chạy tại ESP32.\n",
+    "outputs": 3,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "flow.set(\"ruleEnabled\", false); if (flow.get(\"ruleIdleSeconds\") === undefined) flow.set(\"ruleIdleSeconds\", 30); flow.set(\"ruleBegin\", null); flow.set(\"ruleFired\", false); flow.set(\"ruleLastAt\", null); flow.set(\"ruleLastUptime\", null);",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "command"
+      ],
+      [
+        "history"
+      ],
+      [
+        "api-response"
+      ]
+    ]
+  },
+  {
+    "id": "enable-rule",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "BAT rule 30s",
+    "x": 150,
+    "y": 360,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "rule_config",
+        "vt": "str"
+      },
+      {
+        "p": "idleSeconds",
+        "v": "30",
+        "vt": "num"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "true",
+    "payloadType": "bool",
+    "wires": [
+      [
+        "rule"
+      ]
+    ]
+  },
+  {
+    "id": "disable-rule",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "TAT rule 30s",
+    "x": 150,
+    "y": 410,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "rule_config",
+        "vt": "str"
+      },
+      {
+        "p": "idleSeconds",
+        "v": "30",
+        "vt": "num"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "false",
+    "payloadType": "bool",
+    "wires": [
+      [
+        "rule"
+      ]
+    ]
+  },
+  {
+    "id": "command-comment",
+    "type": "comment",
+    "z": "dt45-week45",
+    "name": "3. Bam Inject de gui lenh (Retain=false)",
+    "x": 390,
+    "y": 480,
+    "info": "Node kiem tra lenh, chi gui neu co telemetry LIVE trong thoi gian cho (mac dinh 15s, env DT45_LIVE_WINDOW_MS). MQTT out QoS 1, khong retained. Deploy KHONG tu gui lenh.",
+    "wires": []
+  },
+  {
+    "id": "send-all_on",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "ALL_ON",
+    "x": 150,
+    "y": 530,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "manual_command",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "ALL_ON",
+    "payloadType": "str",
+    "wires": [
+      [
+        "command"
+      ]
+    ]
+  },
+  {
+    "id": "send-all_off",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "ALL_OFF",
+    "x": 150,
+    "y": 575,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "manual_command",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "ALL_OFF",
+    "payloadType": "str",
+    "wires": [
+      [
+        "command"
+      ]
+    ]
+  },
+  {
+    "id": "send-auto",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "AUTO",
+    "x": 150,
+    "y": 620,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "manual_command",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "AUTO",
+    "payloadType": "str",
+    "wires": [
+      [
+        "command"
+      ]
+    ]
+  },
+  {
+    "id": "send-on1",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "ON1",
+    "x": 150,
+    "y": 665,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "manual_command",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "ON1",
+    "payloadType": "str",
+    "wires": [
+      [
+        "command"
+      ]
+    ]
+  },
+  {
+    "id": "send-off1",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "OFF1",
+    "x": 150,
+    "y": 710,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "manual_command",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "OFF1",
+    "payloadType": "str",
+    "wires": [
+      [
+        "command"
+      ]
+    ]
+  },
+  {
+    "id": "send-on2",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "ON2",
+    "x": 150,
+    "y": 755,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "manual_command",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "ON2",
+    "payloadType": "str",
+    "wires": [
+      [
+        "command"
+      ]
+    ]
+  },
+  {
+    "id": "send-off2",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "OFF2",
+    "x": 150,
+    "y": 800,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "manual_command",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "OFF2",
+    "payloadType": "str",
+    "wires": [
+      [
+        "command"
+      ]
+    ]
+  },
+  {
+    "id": "send-on3",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "ON3",
+    "x": 150,
+    "y": 845,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "manual_command",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "ON3",
+    "payloadType": "str",
+    "wires": [
+      [
+        "command"
+      ]
+    ]
+  },
+  {
+    "id": "send-off3",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "OFF3",
+    "x": 150,
+    "y": 890,
+    "props": [
+      {
+        "p": "payload"
+      },
+      {
+        "p": "kind",
+        "v": "manual_command",
+        "vt": "str"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "OFF3",
+    "payloadType": "str",
+    "wires": [
+      [
+        "command"
+      ]
+    ]
+  },
+  {
+    "id": "command",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Kiem tra lenh / ma ACK",
+    "x": 620,
+    "y": 540,
+    "func": "const configuredLiveMs = Number(env.get(\"DT45_LIVE_WINDOW_MS\"));  /// Biến môi trường DT45_LIVE_WINDOW_MS (nếu có) để đổi cửa sổ 'dữ liệu trực tiếp'.\n// Wokwi thuong chay cham hon thoi gian thuc (15-60%): heartbeat 2s mo phong co the cach nhau 5-13s thuc.\nconst LIVE_WINDOW_MS = Number.isInteger(configuredLiveMs) && configuredLiveMs >= 3000 ? configuredLiveMs : 15000;  /// Cửa sổ dữ liệu trực tiếp: hợp lệ nếu là số nguyên ≥ 3000 ms, nếu không dùng mặc định 15 000 ms.\nconst command = String(msg.payload).trim().toUpperCase();  /// Lệnh từ dashboard/Telegram/Inject/rule, chuẩn hóa: bỏ khoảng trắng, chữ hoa.\nconst allowed = [\"ALL_ON\",\"ALL_OFF\",\"AUTO\",\"ON1\",\"OFF1\",\"ON2\",\"OFF2\",\"ON3\",\"OFF3\",\"STATUS\",\"PRELIGHT_ON\",\"PRELIGHT_OFF\"];  /// Danh sách trắng các lệnh được phép gửi xuống ESP32.\nconst timeout = /^TIMEOUT=([0-9]{1,3})$/.exec(command);  /// TIMEOUT=X với X là 1–3 chữ số.\nconst validCommand = allowed.includes(command) || (timeout && Number(timeout[1]) >= 3 && Number(timeout[1]) <= 300);  /// Hợp lệ khi nằm trong danh sách trắng hoặc TIMEOUT trong khoảng 3–300 giây.\nfunction reply(status,payload) {  /// Tạo phản hồi HTTP nếu lệnh đến từ API (msg.req có); từ Inject/Telegram thì không cần.\n  return msg.req ? {...msg,statusCode:status,headers:{\"Content-Type\":\"application/json\",\"Cache-Control\":\"no-store\"},payload} : null;  /// Giữ nguyên msg gốc (để node http response biết trả cho request nào), thêm mã trạng thái và JSON.\n}\nconst lastAt = flow.get(\"lastTelemetryAt\");  /// Thời điểm nhận telemetry trực tiếp gần nhất (validate.js ghi).\nconst online = flow.get(\"deviceOnline\") === true && lastAt != null && Date.now() - lastAt <= LIVE_WINDOW_MS;  /// Thiết bị coi là online khi có telemetry LIVE trong cửa sổ 15 s – bản tin retained cũ không tính.\nconst invalidTelemetry = flow.get(\"invalidTelemetry\") === true;  /// Telemetry gần nhất sai cấu trúc → khóa điều khiển.\nconst source = msg.automatic ? \"automation\" : (msg.source || \"inject\");  /// Nguồn lệnh: automation (rule), dashboard, telegram hoặc inject → ghi vào nhật ký và CSDL.\nif (!validCommand || !online || invalidTelemetry) {  /// Không gửi nếu lệnh sai, thiết bị offline hoặc dữ liệu sai:\n  const reason = !validCommand ? \"invalid_command\" : !online ? \"no_live_telemetry\" : \"invalid_telemetry\";  /// lý do từ chối,\n  node.warn(`Tu choi ${command}: ${reason}`);  /// cảnh báo trong Debug của Node-RED,\n  return [null,{payload:{type:\"command_rejected\",command,reason,source}},reply(!validCommand ? 400 : 409,{accepted:false,reason})];  /// ra cổng 2 (nhật ký) sự kiện command_rejected; cổng 3 trả HTTP 400 (lệnh sai) hoặc 409 (thiết bị không sẵn sàng).\n}\nif (!msg.automatic) {  /// Lệnh do người vận hành gửi (không phải rule) →\n  flow.set(\"ruleBegin\", null);  /// hủy đợt đếm kho vắng đang chạy,\n  flow.set(\"ruleFired\", false);  /// cho phép rule chạy lại ở đợt sau.\n}\nconst sequence = (flow.get(\"commandSequence\") || 0) + 1;  /// Số thứ tự lệnh tăng dần trong phiên Node-RED.\nflow.set(\"commandSequence\",sequence);  /// Lưu lại số thứ tự.\nconst id = \"c-\"+Date.now().toString(36)+\"-\"+sequence.toString(36);  /// ID lệnh duy nhất: c-<thời gian base36>-<số thứ tự base36>, ví dụ c-mvapjamd-3.\nconst pending = flow.get(\"commands\") || [];  /// Danh sách lệnh đang theo dõi ACK.\npending.push({id,command,source,sent_at:Date.now(),status:\"waiting\"});  /// Thêm lệnh mới, trạng thái 'waiting' (chờ ESP32 xác nhận).\nflow.set(\"commands\",pending.slice(-20));  /// Chỉ giữ 20 lệnh gần nhất để bộ nhớ không tăng mãi.\nconst topic = \"iot/nhom08/detai45/kho-c7e2/command/all\";  /// Topic lệnh của nhóm.\nreturn [{topic,payload:`CMD|${id}|${command}`,qos:1,retain:false},  /// Cổng 1 → MQTT out: payload CMD|<id>|<lệnh>, QoS 1, KHÔNG retain (để ESP32 kết nối lại không chạy lệnh cũ).\n  {topic,payload:{type:\"command_sent\",id,command,source}},  /// Cổng 2 → nhật ký: command_sent.\n  reply(202,{accepted:true,id,command,status:\"waiting\"})];  /// Cổng 3 → HTTP 202 Accepted: đã gửi, đang chờ ACK.\n  /// ▲ command.js: cổng kiểm soát DUY NHẤT trước khi lệnh xuống ESP32 – dashboard, Telegram, Inject và rule đều phải đi qua đây.\n  ///   3 cổng ra: [MQTT out + debug] [nhật ký] [HTTP response].\n",
+    "outputs": 3,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "mqtt-out",
+        "command-debug"
+      ],
+      [
+        "history"
+      ],
+      [
+        "api-response"
+      ]
+    ]
+  },
+  {
+    "id": "mqtt-out",
+    "type": "mqtt out",
+    "z": "dt45-week45",
+    "name": "Gui lenh xuong ESP32",
+    "x": 950,
+    "y": 510,
+    "topic": "",
+    "qos": "1",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "dt45-emqx",
+    "wires": []
+  },
+  {
+    "id": "command-debug",
+    "type": "debug",
+    "z": "dt45-week45",
+    "name": "LENH DA GUI",
+    "x": 960,
+    "y": 580,
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "wires": []
+  },
+  {
+    "id": "history",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Dong log JSONL + timestamp",
+    "x": 1210,
+    "y": 280,
+    "func": "let event = msg.payload;  /// Sự kiện đầu vào (từ validate, status, ESP32 event, command, rule, monitor, telegram...).\nif (typeof event === \"string\") {  /// Bản tin MQTT dạng chuỗi (ví dụ ACK từ topic event) →\n  try { event = JSON.parse(event); }  /// thử đọc JSON,\n  catch { event = {type:\"message\",value:event}; }  /// không phải JSON thì bọc lại thành {type:'message'}.\n}\nif (!event || typeof event !== \"object\" || Array.isArray(event)) {  /// Không phải đối tượng hợp lệ →\n  event = {type:\"message\",value:event};  /// cũng bọc lại để luôn ghi được.\n}\nconst record = {time:new Date().toISOString(),topic:msg.topic || \"\",event};  /// Dòng nhật ký: thời gian ISO (UTC), topic nguồn và nội dung sự kiện.\nconst journal = flow.get(\"journal\") || [];  /// Nhật ký trong bộ nhớ cho dashboard.\njournal.push(record);  /// Thêm dòng mới.\nflow.set(\"journal\",journal.slice(-100));  /// Chỉ giữ 100 dòng gần nhất (bản đầy đủ nằm trong file JSONL và CSDL).\nif (event && event.type === \"command\" && typeof event.id === \"string\" && event.id) {  /// Sự kiện là ACK của ESP32 có ID →\n  const commands = flow.get(\"commands\") || [];  /// lấy danh sách lệnh đang chờ,\n  const entry = commands.find(c=>c.id===event.id);  /// tìm lệnh cùng ID,\n  if (entry && (event.command === entry.command || (event.result === \"ERROR\" && event.command === \"\")) && [\"OK\",\"ERROR\"].includes(event.result)) {  /// ACK khớp lệnh (hoặc lỗi không kèm lệnh) và kết quả là OK/ERROR →\n    if (entry.ack_at == null) {  /// chỉ ghi nhận ACK đầu tiên (ACK lặp lại do duplicate không làm sai số liệu),\n      entry.status = event.result === \"OK\" ? \"acknowledged\" : \"rejected\";  /// acknowledged hoặc rejected,\n      entry.ack_at = Date.now();  /// thời điểm nhận ACK,\n      entry.rtt_ms = Math.max(0,entry.ack_at-entry.sent_at);  /// RTT = thời gian từ lúc gửi tới lúc nhận ACK (số liệu 1,3 s trong báo cáo lấy từ đây),\n      entry.reason = event.reason || \"\";  /// lý do nếu ESP32 từ chối.\n    }\n    flow.set(\"commands\",commands);  /// Lưu lại.\n  }\n}\nmsg.payload = JSON.stringify(record);  /// Đổi thành một dòng JSON để ghi file.\nmsg.filename = env.get(\"DT45_LOG_FILE\") || \"node-red/logs/events.jsonl\";  /// File nhật ký node-red/logs/events.jsonl (đổi bằng DT45_LOG_FILE).\nreturn msg;  /// → file-log, debug, db-event (CSDL) và telegram-notify.\n/// ▲ history.js: điểm gom MỌI sự kiện của hệ thống → 1 dòng {time, topic, event}; đồng thời ghép ACK với lệnh để tính RTT.\n///   Dòng mẫu: {\"time\":\"2026-11-16T15:54:51.783Z\",\"topic\":\"…/event\",\"event\":{\"type\":\"command\",\"result\":\"OK\",\"id\":\"c-…\",\"command\":\"ON1\"}}\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "file-log",
+        "log-debug",
+        "db-event",
+        "telegram-notify"
+      ]
+    ]
+  },
+  {
+    "id": "file-log",
+    "type": "file",
+    "z": "dt45-week45",
+    "name": "Luu lich su event",
+    "x": 1480,
+    "y": 240,
+    "filename": "filename",
+    "filenameType": "msg",
+    "appendNewline": true,
+    "createDir": true,
+    "overwriteFile": "false",
+    "encoding": "utf8",
+    "wires": []
+  },
+  {
+    "id": "log-debug",
+    "type": "debug",
+    "z": "dt45-week45",
+    "name": "LICH SU / ACK / RULE",
+    "x": 1480,
+    "y": 310,
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "wires": []
+  },
+  {
+    "id": "catch-errors",
+    "type": "catch",
+    "z": "dt45-week45",
+    "name": "Bat loi JSON / flow / file",
+    "x": 1180,
+    "y": 400,
+    "scope": null,
+    "uncaught": false,
+    "wires": [
+      [
+        "error-debug"
+      ]
+    ]
+  },
+  {
+    "id": "error-debug",
+    "type": "debug",
+    "z": "dt45-week45",
+    "name": "LOI FLOW",
+    "x": 1480,
+    "y": 400,
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "wires": []
+  },
+  {
+    "id": "application-comment",
+    "type": "comment",
+    "z": "dt45-week45",
+    "name": "4. Web Dashboard /dashboard + API phan quyen",
+    "x": 390,
+    "y": 1000,
+    "info": "HTTP GET xem trang thai; POST command/rule can x-dt45-token dung. Token doc tu env DT45_CONTROL_TOKEN, khong nam trong export. Du lieu retained khong cho gui lenh.",
+    "wires": []
+  },
+  {
+    "id": "dashboard-page",
+    "type": "http in",
+    "z": "dt45-week45",
+    "name": "GET /dashboard",
+    "x": 160,
+    "y": 1060,
+    "url": "/dashboard",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "wires": [
+      [
+        "dashboard-html"
+      ]
+    ]
+  },
+  {
+    "id": "dashboard-html",
+    "type": "template",
+    "z": "dt45-week45",
+    "name": "Giao dien kho 3 vung",
+    "x": 480,
+    "y": 1060,
+    "field": "payload",
+    "fieldType": "msg",
+    "format": "html",
+    "syntax": "mustache",
+    "template": "<!doctype html>\r\n<html lang=\"vi\">\r\n<head>\r\n<meta charset=\"utf-8\">\r\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\r\n<title>Kho 08 · Điều khiển chiếu sáng</title>\r\n<style>\r\n:root{--ink:#17293b;--muted:#647587;--line:#e1e7ec;--paper:#f4f6f8;--green:#13775e;--mint:#e8f5ee;--amber:#a46313;--danger:#b14436;--radius:16px}\r\n*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 \"Segoe UI\",Arial,sans-serif}button,input{font:inherit}button{cursor:pointer;border:1px solid var(--line);border-radius:9px;background:white;color:var(--ink);padding:10px 16px;font-weight:600}button:hover:not(:disabled){background:#eef3f5}button:disabled{opacity:.42;cursor:not-allowed}button:focus-visible,input:focus-visible{outline:3px solid #78b6a6;outline-offset:3px}.primary{background:var(--green);color:white;border-color:var(--green)}.primary:hover:not(:disabled){background:#0b654d}.dark{background:var(--ink);color:white;border-color:var(--ink)}.dark:hover:not(:disabled){background:#284159}.quiet{background:transparent}header{background:white;border-bottom:1px solid var(--line)}.topbar{max-width:1200px;padding:18px 28px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:16px}.brand{display:flex;align-items:center;gap:11px;font-weight:750;font-size:18px}.brand svg{width:36px;height:36px;color:var(--green)}.top-actions{display:flex;gap:10px;align-items:center}.pill{display:inline-flex;align-items:center;gap:7px;background:#edf1f4;border-radius:30px;padding:5px 11px;font-size:12px;font-weight:700;white-space:nowrap}.pill.good{color:var(--green);background:var(--mint)}.pill.warning{color:var(--amber);background:#fff1db}.dot{width:7px;height:7px;background:currentColor;border-radius:50%}main{max-width:1200px;padding:30px 28px 40px;margin:auto}.eyebrow{color:var(--muted);font-size:11px;font-weight:700;letter-spacing:1.3px;margin:0 0 7px}h1{font-size:30px;letter-spacing:-.8px;line-height:1.2;margin:0 0 9px}h2{font-size:18px;margin:0}h3{font-size:18px;margin:0}.lead{margin:0;color:var(--muted)}.title-row{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px}.sync{color:var(--muted);font-size:12px;text-align:right}.notice{padding:12px 16px;border:1px solid #ead8ba;background:#fff7e9;border-radius:10px;color:#775021;margin-bottom:18px;font-size:14px}.notice.good{background:var(--mint);border-color:#c7e5d8;color:var(--green)}.metrics{display:grid;grid-template-columns:1.35fr 1fr 1fr;gap:14px;margin-bottom:27px}.metric{background:white;border:1px solid var(--line);border-radius:12px;padding:18px 20px}.metric-label{color:var(--muted);font-size:12px}.metric-value{font-size:26px;font-weight:750;letter-spacing:-.7px;margin:5px 0 2px}.metric-value.small{font-size:22px}.metric-note{color:var(--muted);font-size:12px}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:14px}.section-heading p{color:var(--muted);margin:3px 0 0;font-size:13px}.buttons{display:flex;gap:8px;flex-wrap:wrap}.zones{display:grid;grid-template-columns:repeat(3,1fr);gap:17px}.zone{background:white;border:1px solid var(--line);border-radius:var(--radius);padding:21px;overflow:hidden}.zone.stale{background:#fafbfc}.zone-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.zone-number{font-size:11px;font-weight:750;color:var(--muted);letter-spacing:1px;margin-bottom:3px}.aisle{height:105px;margin:19px 0 15px;position:relative;background:#f0f3f5;border-radius:9px;display:flex;justify-content:center;align-items:center;gap:36px;transition:background .2s}.aisle.on{background:#fff4d6}.shelf{width:71px;height:63px;border:3px solid #acb8c1;border-top-width:4px;position:relative;border-radius:2px}.shelf:before,.shelf:after{content:\"\";position:absolute;left:0;right:0;border-top:3px solid #acb8c1;top:17px}.shelf:after{top:38px}.light-symbol{position:absolute;top:10px;left:calc(50% - 9px);width:18px;height:6px;border-radius:9px;background:#a6b2ba}.aisle.on .light-symbol{background:#e6b52e;box-shadow:0 5px 20px #edcd72}.aisle-label{position:absolute;bottom:5px;font-size:9px;letter-spacing:1px;color:#82909b}.zone-status{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:13px;margin-bottom:12px}.light-text{font-size:19px;font-weight:750}.sensors{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:18px}.sensors strong{color:var(--ink);font-weight:650}.zone-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px}.zone-buttons button{padding:8px}.lower{display:grid;grid-template-columns:1.1fr 1fr;gap:18px;margin-top:24px}.panel{background:white;border:1px solid var(--line);border-radius:var(--radius);padding:21px}.panel-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:17px}.rule{padding:15px 0;border-top:1px solid var(--line)}.rule:first-of-type{border-top:0;padding-top:0}.rule-title{font-size:14px;font-weight:700;display:flex;justify-content:space-between;gap:10px}.rule p{font-size:13px;color:var(--muted);margin:7px 0 10px}.rule-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.rule-controls label{font-size:12px;color:var(--muted)}input[type=number]{width:74px;padding:8px;border:1px solid var(--line);border-radius:7px}input[type=password]{width:100%;padding:12px;border:1px solid #b9c6ce;border-radius:8px}.rule-countdown{font-size:12px;font-weight:650;color:var(--green);margin-top:8px;min-height:18px}.legend{display:flex;gap:17px;color:var(--muted);font-size:11px}.legend span:before{content:\"\";display:inline-block;width:14px;border-top:3px solid var(--green);margin-right:5px;vertical-align:middle}.legend span:last-child:before{border-color:#ddb34d}.chart{width:100%;height:150px;margin-top:10px}.chart-empty{color:var(--muted);font-size:13px;text-align:center;padding:35px 0}.chart-note{font-size:11px;color:var(--muted)}.latest{margin-top:12px;padding:10px 12px;background:#f4f7f8;border-radius:8px;font-size:12px;min-height:40px}.latest.warning{background:#fff1db;color:var(--amber)}.journal{margin-top:20px}.journal .panel-head{margin-bottom:10px}table{border-collapse:collapse;width:100%;font-size:12px}th{text-align:left;font-weight:650;color:var(--muted);padding:9px 10px;border-bottom:1px solid var(--line)}td{padding:10px;border-bottom:1px solid #edf1f4;vertical-align:top}td:first-child{white-space:nowrap;color:var(--muted);width:95px}td:last-child{width:110px;color:var(--muted)}.event-empty{color:var(--muted);text-align:center;padding:23px}.feedback{min-height:22px;color:var(--green);font-size:13px;margin-top:10px}.feedback.error{color:var(--danger)}footer{font-size:11px;color:var(--muted);display:flex;justify-content:space-between;gap:16px;margin-top:20px}dialog{border:1px solid var(--line);border-radius:16px;max-width:430px;width:calc(100% - 36px);padding:25px;color:var(--ink);box-shadow:0 20px 90px #1b2d3e2b}dialog::backdrop{background:#17293b70}dialog p{font-size:14px;color:var(--muted);margin:10px 0 18px}dialog label{display:block;font-size:13px;font-weight:650;margin-bottom:7px}dialog .buttons{justify-content:flex-end;margin-top:18px}#auth-error{color:var(--danger);font-size:13px;min-height:20px;margin:8px 0 0}\r\n@media(max-width:850px){.zones{gap:10px}.zone{padding:15px}.aisle{gap:20px}.shelf{width:50px}.lower{grid-template-columns:1fr}.title-row{align-items:flex-start}.section-heading{align-items:flex-start;flex-direction:column}.metrics{grid-template-columns:1fr 1fr 1fr}.metric{padding:15px}.metric-value.small{font-size:19px}}\r\n@media(max-width:600px){main{padding:22px 16px}.topbar{padding:13px 16px}.brand{font-size:16px}.top-actions{gap:6px}.top-actions button{padding:7px 9px;font-size:12px}#role{display:none}h1{font-size:25px}.title-row{display:block}.sync{text-align:left;margin-top:10px}.metrics{grid-template-columns:1fr 1fr}.metric:first-child{grid-column:1/-1}.metric-value{font-size:24px}.zones{grid-template-columns:1fr}.zone{padding:19px}.aisle{height:85px;margin:13px 0}.shelf{width:90px}.lower{margin-top:18px}.panel{padding:18px}.journal{overflow:hidden}td:last-child,th:last-child{display:none}footer{flex-direction:column;gap:4px}}\r\n@media(prefers-reduced-motion:reduce){*{transition:none!important}}\r\nselect{font:inherit;padding:8px;border:1px solid var(--line);border-radius:7px;background:white;color:var(--ink)}.history .field{margin:0 0 12px}.history .table-wrap{max-height:360px;overflow:auto}\r\n.zone-runtime{font-size:12px;color:var(--muted);margin:-6px 0 14px}.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}.field{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin:12px 0}.field label{font-size:13px}.field input[type=time]{font:inherit;padding:8px;border:1px solid var(--line);border-radius:7px}.hint{font-size:12px;color:var(--muted);margin:9px 0}.usage-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.usage-number{font-size:22px;font-weight:750;margin:7px 0}.usage-label{font-size:12px;color:var(--muted)}.usage-section{margin-top:20px}@media(max-width:850px){.settings-grid{grid-template-columns:1fr}}@media(max-width:600px){.usage-grid{grid-template-columns:1fr}.usage-number{margin:2px 0 12px}.field input[type=time]{max-width:120px}}\r\n</style>\r\n</head>\r\n<body>\r\n<header><div class=\"topbar\">\r\n  <div class=\"brand\"><svg viewBox=\"0 0 36 36\" fill=\"none\" aria-hidden=\"true\"><path d=\"M5 30V13L18 6l13 7v17H5Z\" stroke=\"currentColor\" stroke-width=\"2.5\"/><path d=\"M10 30V18h16v12M10 23h16M15 18v12M21 18v12\" stroke=\"currentColor\" stroke-width=\"2\"/></svg>Kho 08<span class=\"pill\">3 vùng</span></div>\r\n  <div class=\"top-actions\"><span class=\"pill\" id=\"role\">Chỉ xem</span><button id=\"unlock\" class=\"quiet\">Mở điều khiển</button></div>\r\n</div></header>\r\n<main>\r\n<div class=\"title-row\"><div><p class=\"eyebrow\">NHÓM 08 · ĐỀ TÀI 45</p><h1>Điều khiển chiếu sáng kho</h1><p class=\"lead\">Theo dõi chuyển động và điều khiển đèn từng vùng.</p></div><div class=\"sync\" id=\"sync\">Đang kết nối dashboard…</div></div>\r\n<div class=\"notice\" id=\"notice\" role=\"status\" aria-live=\"polite\">Đang chờ dữ liệu từ thiết bị.</div>\r\n<div class=\"metrics\">\r\n  <div class=\"metric\"><div class=\"metric-label\">KẾT NỐI THIẾT BỊ</div><div class=\"metric-value small\" id=\"connection\">Đang chờ</div><div class=\"metric-note\" id=\"last-seen\">Chưa nhận dữ liệu trực tiếp</div></div>\r\n  <div class=\"metric\"><div class=\"metric-label\">VÙNG CÓ CHUYỂN ĐỘNG</div><div class=\"metric-value\"><span id=\"motion-count\">—</span><span style=\"font-size:14px;color:var(--muted)\"> / 3</span></div><div class=\"metric-note\" id=\"active-zones\">Chưa có dữ liệu</div></div>\r\n  <div class=\"metric\"><div class=\"metric-label\">ĐÈN ĐANG SÁNG</div><div class=\"metric-value\"><span id=\"light-count\">—</span><span style=\"font-size:14px;color:var(--muted)\"> / 3</span></div><div class=\"metric-note\" id=\"light-note\">Theo trạng thái thiết bị</div></div>\r\n</div>\r\n<section aria-labelledby=\"zones-title\">\r\n<div class=\"section-heading\"><div><h2 id=\"zones-title\">Các vùng chiếu sáng</h2><p id=\"access-note\">Bạn đang ở chế độ chỉ xem. Mở điều khiển để gửi lệnh.</p></div><div class=\"buttons\">\r\n  <button class=\"primary\" data-command=\"ALL_ON\" disabled>Bật tất cả</button><button class=\"dark\" data-command=\"ALL_OFF\" disabled>Tắt tất cả</button><button data-command=\"AUTO\" disabled>Tự động</button>\r\n</div></div>\r\n<div class=\"zones\">\r\n  <article class=\"zone\" id=\"zone1\"><div class=\"zone-head\"><div><div class=\"zone-number\">KHU VỰC 01</div><h3>Vùng 1</h3></div><span class=\"pill mode\">—</span></div><div class=\"aisle\" aria-hidden=\"true\"><div class=\"light-symbol\"></div><div class=\"shelf\"></div><div class=\"shelf\"></div><span class=\"aisle-label\">LỐI KHO A</span></div><div class=\"zone-status\"><span class=\"light-text\">Chưa có dữ liệu</span><span class=\"pill presence\">PIR —</span></div><div class=\"sensors\"><span>PIR <strong class=\"pir\">—</strong></span><span>Chuyển động <strong class=\"motion\">—</strong></span></div><div class=\"zone-buttons\"><button data-command=\"ON1\" disabled>Bật vùng 1</button><button data-command=\"OFF1\" disabled>Tắt vùng 1</button></div></article>\r\n  <article class=\"zone\" id=\"zone2\"><div class=\"zone-head\"><div><div class=\"zone-number\">KHU VỰC 02</div><h3>Vùng 2</h3></div><span class=\"pill mode\">—</span></div><div class=\"aisle\" aria-hidden=\"true\"><div class=\"light-symbol\"></div><div class=\"shelf\"></div><div class=\"shelf\"></div><span class=\"aisle-label\">LỐI KHO B</span></div><div class=\"zone-status\"><span class=\"light-text\">Chưa có dữ liệu</span><span class=\"pill presence\">PIR —</span></div><div class=\"sensors\"><span>PIR <strong class=\"pir\">—</strong></span><span>Chuyển động <strong class=\"motion\">—</strong></span></div><div class=\"zone-buttons\"><button data-command=\"ON2\" disabled>Bật vùng 2</button><button data-command=\"OFF2\" disabled>Tắt vùng 2</button></div></article>\r\n  <article class=\"zone\" id=\"zone3\"><div class=\"zone-head\"><div><div class=\"zone-number\">KHU VỰC 03</div><h3>Vùng 3</h3></div><span class=\"pill mode\">—</span></div><div class=\"aisle\" aria-hidden=\"true\"><div class=\"light-symbol\"></div><div class=\"shelf\"></div><div class=\"shelf\"></div><span class=\"aisle-label\">LỐI KHO C</span></div><div class=\"zone-status\"><span class=\"light-text\">Chưa có dữ liệu</span><span class=\"pill presence\">PIR —</span></div><div class=\"sensors\"><span>PIR <strong class=\"pir\">—</strong></span><span>Chuyển động <strong class=\"motion\">—</strong></span></div><div class=\"zone-buttons\"><button data-command=\"ON3\" disabled>Bật vùng 3</button><button data-command=\"OFF3\" disabled>Tắt vùng 3</button></div></article>\r\n</div><div class=\"feedback\" id=\"feedback\" role=\"status\" aria-live=\"polite\"></div>\r\n</section>\r\n<div class=\"lower\">\r\n<section class=\"panel\" aria-labelledby=\"rules-title\"><div class=\"panel-head\"><h2 id=\"rules-title\">Quy tắc tự động</h2><span class=\"pill\">2 quy tắc</span></div>\r\n  <div class=\"rule\"><div class=\"rule-title\"><span>01 · Đèn theo chuyển động</span><span class=\"pill good\">Tại ESP32</span></div><p>Ở AUTO, chuyển động hợp lệ bật đèn đúng vùng. Đèn tắt sau <strong id=\"hold-seconds\">10</strong> giây không còn chuyển động. Khi bật pre-light, các vùng liền kề cũng sáng trước.</p></div>\r\n  <div class=\"rule\"><div class=\"rule-title\"><span>02 · Tiết kiệm khi kho vắng</span><span class=\"pill\" id=\"rule-badge\">Tắt</span></div><p>Có đèn bật thủ công và cả kho vắng đủ thời gian → đưa cả 3 vùng về AUTO. Đèn tắt sau thời gian giữ nếu kho vẫn vắng.</p><div class=\"rule-controls\"><label for=\"idle-seconds\">Thời gian vắng (giây)</label><input id=\"idle-seconds\" type=\"number\" min=\"15\" max=\"300\" value=\"30\" disabled><button id=\"rule-toggle\" disabled>Bật quy tắc</button><button id=\"rule-save\" class=\"quiet\" disabled>Lưu thời gian</button></div><div class=\"rule-countdown\" id=\"countdown\"></div></div>\r\n</section>\r\n<section class=\"panel\" aria-labelledby=\"activity-title\"><div class=\"panel-head\"><h2 id=\"activity-title\">Hoạt động gần đây</h2><span class=\"pill\">60 mẫu</span></div><div class=\"legend\"><span>Vùng có chuyển động</span><span>Đèn đang sáng</span></div>\r\n<svg id=\"chart\" class=\"chart\" viewBox=\"0 0 420 150\" role=\"img\" aria-label=\"Biểu đồ số vùng chuyển động và số đèn đang sáng\"><g fill=\"none\" stroke=\"#e7ecef\"><path d=\"M27 12H410M27 50H410M27 88H410M27 126H410\"/></g><g fill=\"#82909b\" font-size=\"10\"><text x=\"8\" y=\"16\">3</text><text x=\"8\" y=\"54\">2</text><text x=\"8\" y=\"92\">1</text><text x=\"8\" y=\"130\">0</text></g><path id=\"motion-line\" stroke=\"#13775e\" stroke-width=\"2.5\" fill=\"none\"/><path id=\"light-line\" stroke=\"#ddb34d\" stroke-width=\"2.5\" fill=\"none\"/></svg>\r\n<div class=\"chart-empty\" id=\"chart-empty\">Chưa có mẫu dữ liệu trực tiếp.</div><div class=\"chart-note\">Số lượng vùng và đèn theo telemetry, không phải phép đo điện năng.</div><div class=\"latest\" id=\"latest-command\" role=\"status\" aria-live=\"polite\">Chưa có lệnh trong phiên này.</div>\r\n</section>\r\n</div>\r\n<section class=\"panel usage-section\" aria-labelledby=\"usage-title\"><div class=\"panel-head\"><h2 id=\"usage-title\">Thời gian sáng &amp; ước tính tiết kiệm</h2><span class=\"pill\" id=\"usage-source\">Chờ dữ liệu</span></div>\r\n<div class=\"usage-grid\"><div><div class=\"usage-label\">THỜI GIAN PHIÊN THIẾT BỊ</div><div class=\"usage-number\" id=\"session-time\">—</div></div><div><div class=\"usage-label\">TỔNG THỜI GIAN SÁNG CỦA 3 ĐÈN</div><div class=\"usage-number\" id=\"total-on\">—</div></div><div><div class=\"usage-label\">GIẢM SO VỚI BẬT LIÊN TỤC CẢ 3 ĐÈN</div><div class=\"usage-number\" id=\"saving-pct\">—</div></div></div>\r\n<p class=\"hint\">Ước tính theo thời gian bật, giả sử 3 đèn cùng công suất; chưa đo kWh. Bộ đếm bắt đầu lại khi ESP32 khởi động. Trong Wokwi, đây là thời gian mô phỏng.</p><div class=\"hint\" id=\"zone-usage\">Chưa có thống kê từng vùng.</div></section>\r\n<div class=\"settings-grid\">\r\n<section class=\"panel\" aria-labelledby=\"device-settings-title\"><div class=\"panel-head\"><h2 id=\"device-settings-title\">Cài đặt đèn</h2><span class=\"pill\">Tại ESP32</span></div>\r\n<div class=\"field\"><label for=\"timeout-seconds\">Giữ đèn sau chuyển động (giây)</label><input id=\"timeout-seconds\" type=\"number\" min=\"3\" max=\"300\" value=\"10\" disabled><button id=\"timeout-save\" disabled>Áp dụng</button></div>\r\n<div class=\"field\"><span id=\"prelight-state\" class=\"pill\">Pre-light: tắt</span><button id=\"prelight-toggle\" disabled>Bật pre-light</button></div>\r\n<p class=\"hint\">Pre-light bật vùng liền kề khi PIR đã xác nhận chuyển động và giữ thêm 5 giây. Đèn bật/tắt thủ công luôn được ưu tiên. Mặc định tắt để thử đúng từng vùng.</p>\r\n<p class=\"hint\" id=\"device-config-note\">Cài đặt chỉ có hiệu lực trong phiên chạy; khởi động lại về 10 giây và pre-light tắt.</p></section>\r\n<section class=\"panel\" aria-labelledby=\"alerts-title\"><div class=\"panel-head\"><h2 id=\"alerts-title\">Cảnh báo &amp; ca làm việc</h2><span class=\"pill\">Tại Node-RED</span></div>\r\n<div class=\"field\"><label for=\"pir-high-seconds\">PIR giữ HIGH liên tục (giây)</label><input id=\"pir-high-seconds\" type=\"number\" min=\"5\" max=\"3600\" value=\"120\" disabled></div>\r\n<div class=\"field\"><label for=\"manual-idle-seconds\">Đèn thủ công sáng khi kho vắng (giây)</label><input id=\"manual-idle-seconds\" type=\"number\" min=\"15\" max=\"300\" value=\"60\" disabled></div>\r\n<div class=\"field\"><label><input id=\"shift-enabled\" type=\"checkbox\" disabled> Cảnh báo chuyển động ngoài ca</label></div>\r\n<div class=\"field\"><label for=\"shift-start\">Bắt đầu</label><input id=\"shift-start\" type=\"time\" value=\"08:00\" required disabled><label for=\"shift-end\">Kết thúc</label><input id=\"shift-end\" type=\"time\" value=\"17:00\" required disabled><button id=\"alerts-save\" disabled>Lưu cảnh báo</button></div>\r\n<div class=\"hint\" id=\"shift-summary\">Cảnh báo ngoài ca đang tắt.</div>\r\n<p class=\"hint\" id=\"telegram-status\">Telegram: đang kiểm tra cấu hình.</p>\r\n<p class=\"hint\">Ca áp dụng hằng ngày theo giờ Việt Nam, hỗ trợ qua đêm (ví dụ 22:00–06:00). Ngoài ca có chuyển động chỉ phát cảnh báo, chưa thể kết luận xâm nhập. PIR giữ HIGH lâu là dấu hiệu cần kiểm tra, không tự tắt đèn.</p>\r\n<p class=\"hint\">Cấu hình Node-RED dùng trong phiên chạy; khởi động lại sẽ về mặc định. Quy tắc tiết kiệm có thể đưa đèn về AUTO trước khi đủ thời gian cảnh báo kho vắng.</p></section>\r\n</div>\r\n<div class=\"feedback\" id=\"settings-feedback\" role=\"status\" aria-live=\"polite\"></div>\r\n<section class=\"panel journal history\" aria-labelledby=\"history-title\"><div class=\"panel-head\"><h2 id=\"history-title\">Lịch sử dữ liệu (CSDL SQLite)</h2><span class=\"pill\" id=\"storage-status\">CSDL: —</span></div>\r\n<div class=\"field\"><label for=\"history-kind\">Dữ liệu</label><select id=\"history-kind\"><option value=\"telemetry\">Trạng thái từng vùng</option><option value=\"events\">Sự kiện, lệnh, cảnh báo</option><option value=\"usage\">Thời gian sáng theo ngày</option></select><label for=\"history-hours\">Khoảng</label><select id=\"history-hours\"><option value=\"1\">1 giờ</option><option value=\"24\" selected>24 giờ</option><option value=\"168\">7 ngày</option></select><label for=\"history-zone\">Vùng</label><select id=\"history-zone\"><option value=\"all\">Tất cả</option><option value=\"1\">Vùng 1</option><option value=\"2\">Vùng 2</option><option value=\"3\">Vùng 3</option></select><button id=\"history-load\">Xem</button><button id=\"history-csv\" class=\"quiet\">Tải CSV</button></div>\r\n<div class=\"table-wrap\"><table><thead><tr id=\"history-head\"></tr></thead><tbody id=\"history-rows\"></tbody></table></div><div class=\"event-empty\" id=\"history-empty\">Bấm Xem để truy vấn lịch sử đã lưu.</div>\r\n<p class=\"hint\" id=\"history-note\">Trạng thái 3 vùng được lưu khi thay đổi hoặc mỗi 10 giây; lệnh, ACK và cảnh báo được lưu ngay. Dữ liệu vẫn còn sau khi khởi động lại Node-RED.</p></section>\r\n<section class=\"panel journal\" aria-labelledby=\"journal-title\"><div class=\"panel-head\"><h2 id=\"journal-title\">Nhật ký sự kiện</h2><button id=\"export-log\" class=\"quiet\">Tải nhật ký phiên</button></div><table><thead><tr><th>Giờ Việt Nam</th><th>Sự kiện</th><th>Nguồn</th></tr></thead><tbody id=\"events\"></tbody></table><div class=\"event-empty\" id=\"event-empty\">Chưa có sự kiện. Hãy khởi động thiết bị.</div></section>\r\n<footer><span>Nhóm 08 · Chiếu sáng kho theo khu vực xe nâng</span><span id=\"device-id\">Thiết bị: —</span></footer>\r\n</main>\r\n<dialog id=\"auth-dialog\" aria-labelledby=\"auth-title\"><form id=\"auth-form\"><h2 id=\"auth-title\">Mở quyền điều khiển</h2><p>Trong VS Code, mở terminal đang chạy Node-RED, tìm dòng <strong>Ma dieu khien dashboard:</strong> rồi sao chép chuỗi phía sau dấu hai chấm vào ô dưới. Người xem vẫn theo dõi được trạng thái và nhật ký.</p><label for=\"control-code\">Mã điều khiển</label><input type=\"password\" id=\"control-code\" autocomplete=\"off\" required><div id=\"auth-error\" role=\"alert\"></div><div class=\"buttons\"><button type=\"button\" id=\"cancel-auth\">Hủy</button><button class=\"primary\" type=\"submit\">Mở điều khiển</button></div></form></dialog>\r\n<script>\r\n'use strict';  /// Chế độ nghiêm ngặt của JavaScript.\r\nlet token='',state=null,inflight=false,busy=false,backendError=false;  /// token = mã điều khiển đã nhập; state = ảnh chụp trạng thái mới nhất; inflight = đang gọi API; busy = đang gửi lệnh; backendError = mất kết nối Node-RED.\r\nlet deviceDirty=false,alertsDirty=false,ruleDirty=false;  /// Cờ 'đang sửa dở' của từng form → lần cập nhật mỗi giây không ghi đè thứ người dùng đang gõ.\r\nconst $=id=>document.getElementById(id);  /// Viết tắt document.getElementById.\r\nconst formatTime=value=>new Intl.DateTimeFormat('vi-VN',{timeZone:'Asia/Ho_Chi_Minh',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date(value));  /// Định dạng giờ theo múi Asia/Ho_Chi_Minh (giờ Việt Nam) dù trình duyệt ở múi giờ nào.\r\nconst reasons={operator_required:'Bạn cần nhập đúng mã điều khiển.',control_not_configured:'Hãy khởi động Node-RED bằng script của project để tạo mã điều khiển.',no_live_telemetry:'ESP32 chưa gửi dữ liệu trực tiếp trong thời gian chờ (mặc định 15 giây).',no_live_telemetry_6s:'ESP32 chưa có dữ liệu trực tiếp trong 6 giây gần nhất.',invalid_command:'Lệnh không hợp lệ.',invalid_rule_config:'Thời gian vắng cần là số nguyên từ 15 đến 300 giây.',invalid_idle_seconds:'Thời gian vắng cần từ 15 đến 300 giây.'};  /// Bảng diễn giải mã lỗi của API sang tiếng Việt.\r\nreasons.invalid_telemetry='Dữ liệu ESP32 sai định dạng. Điều khiển tạm khóa đến khi nhận lại dữ liệu hợp lệ.';  /// Thêm lý do: telemetry sai cấu trúc.\r\nreasons.invalid_alert_config='PIR: 5–3600 giây; kho vắng: 15–300 giây. Giờ ca cần hợp lệ và khác nhau.';  /// Thêm lý do: cấu hình cảnh báo không hợp lệ.\r\nconst duration=ms=>{const s=Math.floor(ms/1000);return Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m '+s%60+'s'};  /// ms → dạng '0h 1m 25s'.\r\nfunction headers(){return token?{'x-dt45-token':token}:{}}  /// Header x-dt45-token chỉ gửi khi đã nhập mã điều khiển.\r\nasync function snapshot(){  /// Lấy trạng thái từ GET /dt45/api/state.\r\n  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),4000);  /// Hủy yêu cầu nếu quá 4 s (tránh treo khi Node-RED tắt).\r\n  try{const r=await fetch('/dt45/api/state',{headers:headers(),cache:'no-store',signal:controller.signal});if(!r.ok)throw Error('Không đọc được trạng thái.');return await r.json()}finally{clearTimeout(timeout)}  /// Gọi API, không dùng cache; lỗi HTTP → báo lỗi.\r\n}\r\n/// ▲ snapshot(): đọc trạng thái; dashboard chỉ hiển thị dữ liệu do ESP32 báo về qua Node-RED, không tự đoán.\r\nfunction feedback(text,error=false){['feedback','settings-feedback'].forEach(id=>{$(id).textContent=text;$(id).classList.toggle('error',error)})}  /// Hiện thông báo dưới khu vực điều khiển và khu vực cài đặt (đỏ nếu là lỗi).\r\nfunction setControls(){  /// Bật/tắt các nút theo quyền và trạng thái:\r\n  const operator=state&&state.role==='operator';  /// người vận hành = đã nhập đúng mã,\r\n  const canControl=operator&&state.online&&!state.invalid_telemetry&&state.control_allowed!==false;  /// chỉ điều khiển đèn khi là người vận hành, thiết bị online và dữ liệu hợp lệ,\r\n  document.querySelectorAll('[data-command]').forEach(b=>b.disabled=!canControl||busy||backendError);  /// các nút Bật/Tắt/Tự động,\r\n  ['idle-seconds','rule-toggle','rule-save'].forEach(id=>$(id).disabled=!operator||busy||backendError);  /// form quy tắc kho vắng (chỉ cần quyền vận hành),\r\n  const supported=typeof state?.telemetry?.prelight_enabled==='boolean';  /// firmware có hỗ trợ cài đặt đèn không (có trường prelight_enabled),\r\n  ['timeout-seconds','timeout-save','prelight-toggle'].forEach(id=>$(id).disabled=!canControl||!supported||busy||backendError);  /// form thời gian giữ và pre-light (cần thiết bị online vì gửi xuống ESP32),\r\n  ['pir-high-seconds','manual-idle-seconds','shift-enabled','shift-start','shift-end','alerts-save'].forEach(id=>$(id).disabled=!operator||busy||backendError);  /// form cảnh báo & ca làm việc (lưu ở Node-RED nên không cần thiết bị online),\r\n  $('role').textContent=operator?'Điều khiển':'Chỉ xem';$('role').classList.toggle('good',!!operator);  /// nhãn vai trò: Điều khiển / Chỉ xem,\r\n  $('unlock').textContent=operator?'Khóa điều khiển':'Mở điều khiển';  /// nút Mở/Khóa điều khiển,\r\n  $('access-note').textContent=operator?(state.invalid_telemetry?reasons.invalid_telemetry:state.online?'Lệnh được gửi đến thiết bị và theo dõi xác nhận.':'Thiết bị offline. Điều khiển đèn tạm khóa.'):'Bạn đang ở chế độ chỉ xem. Mở điều khiển để gửi lệnh.';  /// dòng hướng dẫn tương ứng với tình trạng.\r\n}\r\n/// ▲ setControls(): người chỉ xem không bấm được nút; thiết bị offline thì khóa điều khiển đèn.\r\nfunction eventText(e){  /// Diễn giải một sự kiện nhật ký thành câu tiếng Việt:\r\n  switch(e.type){  /// theo loại sự kiện:\r\n    case 'state':return Array.isArray(e.zones)?e.zones.filter(z=>z&&typeof z==='object').map(z=>'Vùng '+z.id+': '+(z.led?'bật':'tắt')+' / '+z.mode).join(' · '):'Sự kiện trạng thái thiếu dữ liệu vùng';  /// trạng thái 3 vùng,\r\n    case 'command_sent':return 'Gửi '+e.command+' · '+e.id;  /// lệnh đã gửi,\r\n    case 'command':return (e.result==='OK'?'ESP32 xác nhận':'ESP32 từ chối')+' '+(e.command||'lệnh')+(e.id?' · '+e.id:'');  /// ACK của ESP32,\r\n    case 'automation':return 'Kho vắng '+e.idle_seconds+' giây → gửi AUTO';  /// rule tự động,\r\n    case 'rule_config':return (e.enabled?'Bật':'Tắt')+' rule tiết kiệm · '+e.idle_seconds+' giây';  /// thay đổi cấu hình rule,\r\n    case 'alert_config':return 'Lưu cảnh báo: PIR '+e.pir_high_seconds+'s · kho vắng '+e.manual_idle_seconds+'s · ca '+(e.shift_enabled?e.shift_start+'–'+e.shift_end:'tắt');  /// thay đổi cấu hình cảnh báo,\r\n    case 'connection':return 'Thiết bị '+(e.status==='online'?'kết nối':'mất kết nối');  /// online / offline,\r\n    case 'recovery':return e.code==='PIR_HIGH_CLEARED'?'PIR vùng '+e.zone+' đã trở về LOW':e.code==='MANUAL_IDLE_CLEARED'?'Đã hết điều kiện đèn thủ công sáng khi kho vắng':e.code==='AFTER_HOURS_CLEARED'?'Đã hết điều kiện chuyển động ngoài ca':'Thiết bị đã gửi dữ liệu trở lại';  /// các sự kiện phục hồi,\r\n    case 'alert':return e.code==='DEVICE_OFFLINE'?'Cảnh báo: mất dữ liệu/kết nối thiết bị':e.code==='PIR_HIGH_LONG'?'Cảnh báo: PIR vùng '+e.zone+' giữ HIGH quá '+e.high_seconds+' giây; kiểm tra hoạt động/cảm biến':e.code==='MANUAL_LIGHT_IDLE'?'Cảnh báo: đèn thủ công đang sáng khi cả kho vắng '+e.idle_seconds+' giây':e.code==='AFTER_HOURS_MOTION'?'Cảnh báo: có chuyển động ngoài ca làm việc':'Cảnh báo: chưa nhận xác nhận '+e.command+' sau 12 giây';  /// các cảnh báo,\r\n    case 'command_rejected':return 'Từ chối '+e.command+': '+(reasons[e.reason]||e.reason);  /// lệnh bị từ chối,\r\n    case 'validation_error':return 'Dữ liệu sai định dạng; bỏ qua xử lý tự động';  /// telemetry sai cấu trúc,\r\n    default:return 'Sự kiện '+(e.type||'thiết bị');  /// loại khác.\r\n  }\r\n}\r\nfunction render(s){  /// Vẽ lại toàn bộ giao diện từ ảnh chụp trạng thái s (gọi mỗi giây):\r\n  state=s;backendError=false;  /// lưu trạng thái, xóa lỗi kết nối,\r\n  $('connection').textContent=s.online?'Trực tuyến':(s.telemetry?'Mất kết nối':'Chờ thiết bị');  /// thẻ KẾT NỐI THIẾT BỊ,\r\n  $('connection').style.color=s.online?'var(--green)':'var(--muted)';  /// màu xanh khi online,\r\n  $('sync').textContent='Dashboard cập nhật '+formatTime(s.server_time);  /// giờ cập nhật dashboard,\r\n  $('last-seen').textContent=s.last_seen_at?'Nhận trực tiếp lúc '+formatTime(s.last_seen_at)+' · '+Math.floor(s.age_ms/1000)+' giây trước':'Chưa nhận dữ liệu trực tiếp';  /// lần nhận dữ liệu trực tiếp gần nhất,\r\n  let notice=s.online?'Thiết bị đang gửi dữ liệu. Trạng thái đèn được cập nhật từ ESP32.':(s.telemetry?'Thiết bị offline hoặc dữ liệu đã quá '+Math.round((s.live_window_ms||15000)/1000)+' giây. Các vùng dưới đây là trạng thái gần nhất.':'Đang chờ ESP32. Hãy chạy Wokwi và kiểm tra kết nối MQTT.');  /// thanh thông báo tổng quát,\r\n  if(s.invalid_telemetry)notice=reasons.invalid_telemetry+' Các vùng dưới đây là trạng thái hợp lệ gần nhất.';  /// dữ liệu sai → thông báo riêng,\r\n  const sensorWarnings=s.sensor_alerts||[];  /// vùng đang cảnh báo PIR,\r\n  if(s.online&&sensorWarnings.length)notice+=' Cảnh báo: PIR vùng '+sensorWarnings.join(', ')+' đang giữ HIGH kéo dài; cần kiểm tra.';  /// thêm cảnh báo PIR HIGH lâu,\r\n  if(s.incident_alerts?.manual_idle)notice+=' Đèn thủ công đang sáng khi kho vắng.';  /// thêm cảnh báo đèn bật tay khi vắng,\r\n  if(s.incident_alerts?.after_hours)notice+=' Có chuyển động ngoài ca làm việc.';  /// thêm cảnh báo ngoài ca,\r\n  $('notice').textContent=notice;$('notice').classList.toggle('good',s.online&&!s.invalid_telemetry&&!sensorWarnings.length&&!s.incident_alerts?.manual_idle&&!s.incident_alerts?.after_hours);  /// thanh thông báo màu xanh khi mọi thứ bình thường,\r\n  const zones=s.telemetry?s.telemetry.zones:[],active=zones.filter(z=>z.motion);  /// danh sách vùng và vùng có chuyển động,\r\n  $('motion-count').textContent=zones.length?active.length:'—';$('light-count').textContent=zones.length?zones.filter(z=>z.led).length:'—';  /// thẻ VÙNG CÓ CHUYỂN ĐỘNG và ĐÈN ĐANG SÁNG (x / 3),\r\n  $('active-zones').textContent=zones.length?(active.length?'Vùng '+active.map(z=>z.id).join(', '):'Không có chuyển động'):'Chưa có dữ liệu';  /// liệt kê vùng có chuyển động,\r\n  $('light-note').textContent=s.online&&!s.invalid_telemetry?'Theo trạng thái thiết bị':'Theo dữ liệu gần nhất';  /// nguồn số liệu đèn,\r\n  zones.forEach(z=>{  /// cập nhật 3 thẻ vùng:\r\n    const card=$('zone'+z.id);card.classList.toggle('stale',!s.online||s.invalid_telemetry);  /// làm mờ thẻ khi dữ liệu cũ,\r\n    card.querySelector('.aisle').classList.toggle('on',z.led);  /// hình kệ sáng/tối theo đèn,\r\n    card.querySelector('.light-text').textContent=z.led?'Đèn đang bật':'Đèn đang tắt';  /// chữ trạng thái đèn,\r\n    const mode=card.querySelector('.mode');mode.textContent=z.mode==='AUTO'?'Tự động':'Thủ công';mode.classList.toggle('good',z.mode==='AUTO');mode.classList.toggle('warning',z.mode==='MANUAL');  /// nhãn Tự động / Thủ công,\r\n    const presence=card.querySelector('.presence');presence.textContent=z.motion?'Có chuyển động':'Không chuyển động';presence.classList.toggle('good',z.motion);  /// nhãn chuyển động,\r\n    card.querySelector('.pir').textContent=z.pir?'HIGH':'LOW';card.querySelector('.motion').textContent=z.motion?'Có':'Không';  /// PIR HIGH/LOW và chuyển động hợp lệ.\r\n  });\r\n  $('device-id').textContent='Thiết bị: '+(s.telemetry?s.telemetry.device:'—')+(s.telemetry?' · Uptime '+Math.floor(s.telemetry.uptime_ms/1000)+' giây':'');  /// Chân trang: ID thiết bị và uptime,\r\n  $('hold-seconds').textContent=s.telemetry?Math.round(s.telemetry.timeout_ms/1000):10;  /// thời gian giữ hiện tại (giây),\r\n  $('rule-badge').textContent=s.rule.enabled?'Đang bật':'Tắt';$('rule-badge').classList.toggle('good',s.rule.enabled);  /// nhãn quy tắc kho vắng,\r\n  $('rule-toggle').textContent=s.rule.enabled?'Tắt quy tắc':'Bật quy tắc';  /// chữ trên nút bật/tắt quy tắc,\r\n  if(!ruleDirty&&document.activeElement!==$('idle-seconds'))$('idle-seconds').value=s.rule.idle_seconds;  /// ô ngưỡng kho vắng (không ghi đè khi đang sửa),\r\n  const supported=typeof s.telemetry?.prelight_enabled==='boolean',prelight=s.telemetry?.prelight_enabled===true;  /// firmware có hỗ trợ cài đặt đèn và pre-light đang bật không,\r\n  if(!deviceDirty&&document.activeElement!==$('timeout-seconds'))$('timeout-seconds').value=s.telemetry?Math.round(s.telemetry.timeout_ms/1000):10;  /// ô thời gian giữ (không ghi đè khi đang sửa),\r\n  $('prelight-state').textContent='Pre-light: '+(prelight?'đang bật':'tắt');$('prelight-state').classList.toggle('good',prelight);  /// nhãn pre-light,\r\n  $('prelight-toggle').textContent=prelight?'Tắt pre-light':'Bật pre-light';  /// chữ trên nút pre-light,\r\n  $('device-config-note').textContent=supported?'Cài đặt chỉ có hiệu lực trong phiên chạy; khởi động lại về 10 giây và pre-light tắt.':'Cần build và chạy firmware mới để dùng cài đặt đèn.';  /// ghi chú cài đặt đèn,\r\n  const cfg=s.alert_config;  /// cấu hình cảnh báo hiện tại,\r\n  if(cfg)$('shift-summary').textContent=cfg.shift_enabled?'Ca đã lưu: '+cfg.shift_start+'–'+cfg.shift_end+' (24 giờ, giờ Việt Nam).':'Cảnh báo ngoài ca đang tắt.';  /// tóm tắt ca làm việc,\r\n  if(cfg&&!alertsDirty){$('pir-high-seconds').value=cfg.pir_high_seconds;$('manual-idle-seconds').value=cfg.manual_idle_seconds;$('shift-enabled').checked=cfg.shift_enabled;$('shift-start').value=cfg.shift_start;$('shift-end').value=cfg.shift_end}  /// điền form cảnh báo (nếu không đang sửa),\r\n  const usage=s.usage;  /// thống kê thời gian sáng:\r\n  $('usage-source').textContent=usage?(s.online&&!s.invalid_telemetry?'Trong phiên hiện tại':'Dữ liệu gần nhất'):'Chờ firmware mới';  /// nguồn số liệu,\r\n  $('session-time').textContent=usage?duration(usage.session_ms):'—';$('total-on').textContent=usage?duration(usage.total_on_ms):'—';  /// thời gian phiên và tổng thời gian sáng,\r\n  $('saving-pct').textContent=usage&&usage.saving_pct!=null?usage.saving_pct.toFixed(1)+'%':'—';  /// % ước tính tiết kiệm,\r\n  $('zone-usage').textContent=usage?zones.map(z=>'Vùng '+z.id+': '+duration(z.on_ms)).join(' · '):'Chưa có thống kê từng vùng.';  /// thời gian sáng từng vùng,\r\n  $('countdown').textContent=s.rule.remaining_ms!=null?'Đếm vắng: còn '+Math.ceil(s.rule.remaining_ms/1000)+' giây':(s.rule.enabled?'Đang chờ điều kiện kho vắng và có đèn bật thủ công.':'Bật quy tắc khi muốn thử chế độ tiết kiệm.');  /// dòng đếm ngược kho vắng,\r\n  const samples=s.samples||[];  /// biểu đồ 60 mẫu gần nhất:\r\n  $('chart').style.display=samples.length?'block':'none';$('chart-empty').style.display=samples.length?'none':'block';  /// ẩn/hiện biểu đồ,\r\n  function chartLine(field){return samples.map((p,i)=>(i?'L':'M')+(27+i*383/Math.max(1,samples.length-1)).toFixed(1)+','+(126-p[field]*38).toFixed(1)).join(' ')}  /// đổi mẫu thành đường SVG (trục x: thời gian, trục y: 0–3),\r\n  $('motion-line').setAttribute('d',chartLine('motion'));$('light-line').setAttribute('d',chartLine('lights'));  /// vẽ đường 'vùng có chuyển động' và 'đèn đang sáng',\r\n  const latest=s.commands[s.commands.length-1];  /// lệnh gần nhất:\r\n  if(latest){  /// nếu có,\r\n    const labels={waiting:'Đã gửi · đang chờ ESP32',acknowledged:'ESP32 đã xác nhận',rejected:'ESP32 từ chối',timeout:'Chưa có xác nhận sau 12 giây'};  /// nhãn trạng thái chờ/đã xác nhận/từ chối/quá hạn,\r\n    $('latest-command').textContent=latest.command+' — '+labels[latest.status]+' · '+latest.id+(latest.rtt_ms!=null?' · ACK '+latest.rtt_ms+' ms':'');  /// hiển thị lệnh, trạng thái, ID và thời gian ACK,\r\n    $('latest-command').classList.toggle('warning',['timeout','rejected'].includes(latest.status));  /// tô vàng khi quá hạn hoặc bị từ chối,\r\n  }\r\n  const body=$('events');body.replaceChildren();const events=s.events.slice(-12).reverse();$('event-empty').hidden=!!events.length;  /// bảng nhật ký: 12 sự kiện mới nhất,\r\n  events.forEach(record=>{  /// mỗi sự kiện một dòng:\r\n    const tr=document.createElement('tr');  /// tạo dòng,\r\n    const source=record.event.source||(['automation','rule_config'].includes(record.event.type)?'Node-RED':record.event.type==='command'?'ESP32':'Hệ thống');  /// nguồn: dashboard/telegram/Node-RED/ESP32/Hệ thống,\r\n    [formatTime(record.time),eventText(record.event),source].forEach(text=>{const td=document.createElement('td');td.textContent=text;tr.appendChild(td)});  /// 3 ô: giờ, nội dung, nguồn (textContent → không chèn được HTML lạ),\r\n    body.appendChild(tr);  /// thêm vào bảng.\r\n  });\r\n  const st=s.storage||{};$('storage-status').textContent=st.available?'CSDL: '+st.telemetry_rows+' trạng thái · '+st.event_rows+' sự kiện':'CSDL: chưa sẵn sàng';$('storage-status').classList.toggle('good',!!st.available);  /// nhãn CSDL: số dòng trạng thái và số sự kiện đã lưu,\r\n  const tg=s.telegram||{};$('telegram-status').textContent=tg.enabled?'Telegram: đang bật · '+tg.chats+' chat được phép · đã gửi '+tg.sent+' tin'+(tg.last_error?' · lỗi gần nhất: '+tg.last_error:''):'Telegram: chưa cấu hình (xem node-red/telegram.local.example.ps1).';  /// trạng thái Telegram,\r\n  setControls();  /// cuối cùng bật/tắt các nút.\r\n}\r\n/// ▲ render(): không giữ trạng thái riêng – mọi thứ vẽ lại từ /dt45/api/state, nên giao diện luôn khớp thiết bị.\r\nasync function poll(){  /// Hỏi Node-RED trạng thái mới (mỗi giây):\r\n  if(inflight)return;inflight=true;  /// không gọi chồng nếu lần trước chưa xong,\r\n  try{render(await snapshot())}catch{  /// vẽ lại; lỗi →\r\n    backendError=true;$('notice').classList.remove('good');$('notice').textContent='Không kết nối được Node-RED. Kiểm tra terminal đang chạy; dữ liệu trên trang có thể đã cũ.';  /// báo mất kết nối Node-RED, khóa nút,\r\n    $('connection').textContent='Dashboard mất kết nối';setControls();  /// đổi thẻ kết nối,\r\n  }finally{inflight=false}  /// cho phép lần gọi sau.\r\n}\r\nasync function post(path,payload){  /// Gửi POST tới API (command, rule, alerts):\r\n  if(busy)return;busy=true;setControls();feedback('');  /// chặn bấm liên tục, khóa nút trong lúc gửi,\r\n  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),4000);  /// hủy nếu quá 4 s,\r\n  try{\r\n    const r=await fetch('/dt45/api/'+path,{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});  /// gửi JSON kèm mã điều khiển,\r\n    const result=await r.json();if(!r.ok)throw Error(reasons[result.reason]||'Không gửi được yêu cầu.');  /// đọc kết quả; lỗi → diễn giải lý do,\r\n    feedback(path==='command'?'Đã gửi '+result.command+'. Đang chờ ESP32 xác nhận.':'Đã lưu quy tắc.');  /// báo đã gửi và đang chờ ESP32 xác nhận,\r\n    await poll();  /// cập nhật trạng thái ngay,\r\n    return true;  /// thành công.\r\n  }catch(e){feedback(e.name==='AbortError'?'Yêu cầu chưa có phản hồi. Kiểm tra nhật ký và trạng thái trước khi gửi lại.':e.message,true)}finally{clearTimeout(timeout);busy=false;setControls()}  /// lỗi → hiện thông báo; luôn mở khóa nút.\r\n}\r\n/// ▲ post(): gửi lệnh/cấu hình; nút chỉ báo 'đã gửi', trạng thái đèn chỉ đổi khi ESP32 gửi telemetry mới.\r\ndocument.querySelectorAll('[data-command]').forEach(b=>b.addEventListener('click',()=>post('command',{command:b.dataset.command})));  /// Gắn sự kiện click cho các nút có data-command (Bật/Tắt từng vùng, Bật/Tắt tất cả, Tự động).\r\nasync function ruleConfig(enabled){const idle=Number($('idle-seconds').value);if(!Number.isInteger(idle)||idle<15||idle>300){feedback(reasons.invalid_rule_config,true);return}if(await post('rule',{enabled,idle_seconds:idle})){ruleDirty=false;poll()}}  /// Lưu cấu hình quy tắc kho vắng (kiểm tra 15–300 giây trước khi gửi).\r\n$('idle-seconds').addEventListener('input',()=>ruleDirty=true);  /// Đánh dấu đang sửa ngưỡng.\r\n$('rule-toggle').addEventListener('click',()=>ruleConfig(!state.rule.enabled));$('rule-save').addEventListener('click',()=>ruleConfig(state.rule.enabled));  /// Nút bật/tắt và lưu quy tắc.\r\n$('timeout-seconds').addEventListener('input',()=>deviceDirty=true);  /// Đánh dấu đang sửa thời gian giữ.\r\n$('timeout-save').addEventListener('click',async()=>{const seconds=Number($('timeout-seconds').value);if(!Number.isInteger(seconds)||seconds<3||seconds>300){feedback('Thời gian giữ cần là số nguyên 3–300 giây.',true);return}if(await post('command',{command:'TIMEOUT='+seconds})){deviceDirty=false;poll()}});  /// Áp dụng thời gian giữ: kiểm tra 3–300 giây rồi gửi lệnh TIMEOUT=X.\r\n$('prelight-toggle').addEventListener('click',()=>post('command',{command:state.telemetry.prelight_enabled?'PRELIGHT_OFF':'PRELIGHT_ON'}));  /// Bật/tắt pre-light theo trạng thái ESP32 đã xác nhận.\r\n['pir-high-seconds','manual-idle-seconds','shift-enabled','shift-start','shift-end'].forEach(id=>$(id).addEventListener('input',()=>alertsDirty=true));  /// Đánh dấu đang sửa form cảnh báo.\r\n$('alerts-save').addEventListener('click',async()=>{  /// Lưu cảnh báo & ca làm việc:\r\n  const p={pir_high_seconds:Number($('pir-high-seconds').value),manual_idle_seconds:Number($('manual-idle-seconds').value),shift_enabled:$('shift-enabled').checked,shift_start:$('shift-start').value,shift_end:$('shift-end').value};  /// gom dữ liệu form,\r\n  if(!Number.isInteger(p.pir_high_seconds)||p.pir_high_seconds<5||p.pir_high_seconds>3600||!Number.isInteger(p.manual_idle_seconds)||p.manual_idle_seconds<15||p.manual_idle_seconds>300||!p.shift_start||!p.shift_end||p.shift_start===p.shift_end){feedback(reasons.invalid_alert_config,true);return}  /// kiểm tra phạm vi ngay trên trình duyệt,\r\n  if(await post('alerts',p)){alertsDirty=false;poll()}  /// gửi; thành công thì bỏ cờ đang sửa.\r\n});\r\n$('unlock').addEventListener('click',()=>{  /// Nút Mở/Khóa điều khiển:\r\n  if(state&&state.role==='operator'){token='';feedback('Đã khóa điều khiển.');poll();return}  /// đang có quyền → khóa (xóa mã),\r\n  $('control-code').value='';$('auth-error').textContent='';$('auth-dialog').showModal();$('control-code').focus();  /// chưa có → mở hộp thoại nhập mã.\r\n});\r\n$('cancel-auth').addEventListener('click',()=>$('auth-dialog').close());  /// Nút Hủy trong hộp thoại.\r\n$('auth-form').addEventListener('submit',async e=>{  /// Xác nhận mã:\r\n  e.preventDefault();const old=token;token=$('control-code').value.trim();  /// thử mã mới,\r\n  try{const s=await snapshot();if(s.role!=='operator')throw Error('Mã điều khiển chưa đúng.');render(s);$('auth-dialog').close();$('control-code').value='';feedback('Đã mở quyền điều khiển.')}  /// đọc trạng thái với mã đó; vai trò phải là operator,\r\n  catch(err){token=old;$('auth-error').textContent=err.message}  /// sai → trả lại mã cũ, báo lỗi.\r\n});\r\n$('export-log').addEventListener('click',()=>{  /// Tải nhật ký phiên:\r\n  if(!state||!state.events.length){feedback('Chưa có nhật ký để tải.',true);return}  /// chưa có thì báo,\r\n  const blob=new Blob([state.events.map(e=>JSON.stringify(e)).join('\\n')+'\\n'],{type:'application/x-ndjson'});  /// mỗi sự kiện một dòng JSON (định dạng JSON Lines),\r\n  const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='nhom08-nhat-ky-phien.jsonl';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);  /// tạo link tải file nhom08-nhat-ky-phien.jsonl.\r\n});\r\nconst historyColumns={telemetry:[['ts_vn','Giờ Việt Nam'],['zone_id','Vùng'],['pir','PIR'],['motion','Chuyển động'],['led','Đèn'],['mode','Chế độ'],['on_ms','Đã sáng']],events:[['ts_vn','Giờ Việt Nam'],['type','Sự kiện'],['source','Nguồn']],usage:[['day','Ngày'],['zone_id','Vùng'],['on_seconds','Thời gian sáng'],['samples','Số mẫu']]};  /// Cột của bảng lịch sử cho từng loại dữ liệu.\r\nfunction historyQuery(){return 'kind='+($('history-kind').value||'telemetry')+'&hours='+($('history-hours').value||'24')+'&zone='+($('history-zone').value||'all')}  /// Tham số truy vấn từ 3 ô chọn (loại, khoảng thời gian, vùng).\r\nfunction historyCell(kind,key,row){  /// Định dạng một ô của bảng lịch sử:\r\n  if(kind==='telemetry'){if(key==='pir')return row.pir?'HIGH':'LOW';if(key==='motion')return row.motion?'Có':'Không';if(key==='led')return row.led?'Bật':'Tắt';if(key==='mode')return row.mode==='AUTO'?'Tự động':'Thủ công';if(key==='on_ms')return row.on_ms==null?'—':duration(row.on_ms)}  /// trạng thái vùng: 0/1 → chữ dễ đọc,\r\n  if(kind==='events'){if(key==='type'){let e=null;try{e=JSON.parse(row.detail)}catch(err){e=null}return e?eventText(e):row.type}if(key==='source')return ['state','command'].includes(row.type)?'ESP32':(row.source||'Hệ thống')}  /// sự kiện: dịch nội dung JSON bằng eventText(), nguồn thiết bị ghi là ESP32,\r\n  if(kind==='usage'&&key==='on_seconds')return duration(row.on_seconds*1000);  /// thời gian sáng theo ngày → dạng giờ/phút/giây,\r\n  const value=row[key];return value==null?'—':String(value);  /// còn lại hiển thị nguyên giá trị.\r\n}\r\nasync function loadHistory(){  /// Truy vấn CSDL qua GET /dt45/api/history và vẽ bảng:\r\n  const kind=$('history-kind').value||'telemetry',columns=historyColumns[kind]||historyColumns.telemetry;  /// loại dữ liệu và danh sách cột,\r\n  $('history-empty').hidden=false;$('history-empty').textContent='Đang truy vấn CSDL…';  /// báo đang truy vấn,\r\n  try{\r\n    const r=await fetch('/dt45/api/history?'+historyQuery(),{cache:'no-store'});const data=await r.json();  /// gọi API,\r\n    if(!r.ok||!Array.isArray(data.rows))throw Error(data.reason==='storage_unavailable'?'CSDL chưa sẵn sàng: '+(data.error||''):'Không đọc được lịch sử.');  /// lỗi hoặc CSDL tắt → báo lý do,\r\n    const head=$('history-head');head.replaceChildren();columns.forEach(([,label])=>{const th=document.createElement('th');th.textContent=label;head.appendChild(th)});  /// vẽ tiêu đề cột,\r\n    const body=$('history-rows');body.replaceChildren();  /// xóa dòng cũ,\r\n    data.rows.forEach(row=>{const tr=document.createElement('tr');columns.forEach(([key])=>{const td=document.createElement('td');td.textContent=historyCell(kind,key,row);tr.appendChild(td)});body.appendChild(tr)});  /// vẽ từng dòng,\r\n    $('history-empty').hidden=data.rows.length>0;$('history-empty').textContent='Không có bản ghi trong khoảng đã chọn.';  /// báo nếu không có bản ghi,\r\n    if(data.storage)$('history-note').textContent=data.count+' bản ghi mới nhất · CSDL hiện có '+data.storage.telemetry_rows+' dòng trạng thái và '+data.storage.event_rows+' sự kiện.';  /// dòng tổng: số bản ghi trả về và tổng số trong CSDL.\r\n  }catch(e){$('history-empty').hidden=false;$('history-empty').textContent=e.message}  /// Lỗi → hiện thông báo.\r\n}\r\n/// ▲ loadHistory(): phần xem lại lịch sử từ CSDL SQLite (trạng thái vùng, sự kiện, thời gian sáng theo ngày).\r\n$('history-load').addEventListener('click',loadHistory);  /// Nút Xem.\r\n$('history-csv').addEventListener('click',()=>{const a=document.createElement('a');a.href='/dt45/api/history?'+historyQuery()+'&format=csv&limit=2000';a.click()});  /// Nút Tải CSV: mở URL API với format=csv (tối đa 2000 dòng).\r\npoll();setInterval(poll,1000);loadHistory();  /// Khởi động: lấy trạng thái ngay, sau đó mỗi 1 s; nạp bảng lịch sử một lần.\r\n</script>\r\n</body>\r\n</html>\r\n",
+    "output": "str",
+    "wires": [
+      [
+        "dashboard-response"
+      ]
+    ]
+  },
+  {
+    "id": "dashboard-response",
+    "type": "http response",
+    "z": "dt45-week45",
+    "name": "HTML",
+    "x": 790,
+    "y": 1060,
+    "statusCode": "",
+    "headers": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff"
+    },
+    "wires": []
+  },
+  {
+    "id": "api-state-in",
+    "type": "http in",
+    "z": "dt45-week45",
+    "name": "GET /dt45/api/state",
+    "x": 160,
+    "y": 1130,
+    "url": "/dt45/api/state",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "wires": [
+      [
+        "http-state"
+      ]
+    ]
+  },
+  {
+    "id": "http-state",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Snapshot dashboard",
+    "x": 480,
+    "y": 1130,
+    "func": "const configuredLiveMs = Number(env.get(\"DT45_LIVE_WINDOW_MS\"));  /// Biến môi trường DT45_LIVE_WINDOW_MS (nếu có) để đổi cửa sổ 'dữ liệu trực tiếp'.\n// Wokwi thuong chay cham hon thoi gian thuc (15-60%): heartbeat 2s mo phong co the cach nhau 5-13s thuc.\nconst LIVE_WINDOW_MS = Number.isInteger(configuredLiveMs) && configuredLiveMs >= 3000 ? configuredLiveMs : 15000;  /// Cửa sổ dữ liệu trực tiếp: hợp lệ nếu là số nguyên ≥ 3000 ms, nếu không dùng mặc định 15 000 ms.\nconst now = Date.now(), lastAt = flow.get(\"lastTelemetryAt\"), lastSeen = flow.get(\"lastSeenAt\");  /// Thời điểm hiện tại, lần nhận telemetry trực tiếp và lần thấy thiết bị gần nhất.\nconst online = flow.get(\"deviceOnline\") === true && lastAt != null && now-lastAt <= LIVE_WINDOW_MS;  /// Online khi có telemetry trực tiếp trong cửa sổ 15 s.\nconst begin = flow.get(\"ruleBegin\");  /// Thời điểm bắt đầu đếm kho vắng (null nếu không đếm).\nconst token = env.get(\"DT45_CONTROL_TOKEN\");  /// Mã điều khiển của phiên.\nconst p = flow.get(\"telemetry\");  /// Telemetry gần nhất.\nconst usage = p && Number.isSafeInteger(p.session_ms) && p.zones.every(z => Number.isSafeInteger(z.on_ms)) ? {  /// Tính thống kê thời gian sáng nếu firmware có gửi session_ms và on_ms:\n  session_ms:p.session_ms,total_on_ms:p.zones.reduce((sum,z) => sum+z.on_ms,0),  /// tổng thời gian phiên và tổng thời gian sáng của 3 đèn,\n  saving_pct:p.session_ms > 0 ? Math.max(0,Math.min(100,100*(1-p.zones.reduce((sum,z)=>sum+z.on_ms,0)/(3*p.session_ms)))) : null  /// % giảm = 100 × (1 − tổng sáng / (3 × thời gian phiên)), kẹp trong 0–100.\n} : null;  /// Firmware cũ không có số liệu → null.\nconst configuredHighMs = Number(env.get(\"DT45_PIR_HIGH_MS\"));  /// Ngưỡng PIR HIGH lâu có thể đặt bằng biến môi trường (dùng trong test).\nconst alertConfig = flow.get(\"alertConfig\") || {pir_high_seconds:  /// Cấu hình cảnh báo hiện tại, hoặc mặc định:\n  Number.isInteger(configuredHighMs) && configuredHighMs >= 1000 ? configuredHighMs/1000 : 120,  /// PIR HIGH 120 s,\n  manual_idle_seconds:60,shift_enabled:false,shift_start:\"08:00\",shift_end:\"17:00\"};  /// đèn bật tay khi kho vắng 60 s, cảnh báo ngoài ca tắt, ca 08:00–17:00.\n// CSDL lich su va Telegram duoc tao trong settings.js (functionGlobalContext).\nconst context = typeof global !== \"undefined\" && global && typeof global.get === \"function\" ? global : null;  /// Lấy global context của Node-RED (trong test có thể không có).\nconst store = context ? context.get(\"dt45db\") : null, telegram = context ? context.get(\"dt45tg\") : null;  /// dt45db = CSDL SQLite, dt45tg = Telegram bot – cả hai được tạo trong settings.js.\nmsg.headers = {\"Content-Type\":\"application/json\",\"Cache-Control\":\"no-store\"};  /// Phản hồi JSON, không lưu cache.\nmsg.payload = {  /// Ảnh chụp toàn bộ trạng thái cho dashboard (dashboard gọi mỗi giây):\n  server_time:now,online,live_window_ms:LIVE_WINDOW_MS,reason:flow.get(\"connectionReason\") || \"waiting\",  /// giờ máy chủ, online, cửa sổ live, lý do kết nối,\n  control_allowed:online && flow.get(\"invalidTelemetry\") !== true,  /// được phép điều khiển khi online và dữ liệu hợp lệ,\n  last_seen_at:lastSeen ?? null,age_ms:lastSeen == null ? null : now-lastSeen,  /// lần thấy thiết bị gần nhất và đã bao lâu,\n  role:token && msg.req?.headers?.[\"x-dt45-token\"] === token ? \"operator\" : \"viewer\",  /// vai trò: operator nếu gửi đúng mã, ngược lại viewer,\n  telemetry:flow.get(\"telemetry\") || null,telemetry_source:flow.get(\"telemetrySource\") || null,  /// telemetry gần nhất và nguồn (live/retained),\n  invalid_telemetry:flow.get(\"invalidTelemetry\") === true,  /// dữ liệu gần nhất có sai cấu trúc không,\n  sensor_alerts:online && flow.get(\"invalidTelemetry\") !== true ? Object.keys(flow.get(\"sensorAlerts\") || {}).map(Number) : [],  /// danh sách vùng đang cảnh báo PIR HIGH lâu,\n  usage,alert_config:alertConfig,  /// thống kê thời gian sáng và cấu hình cảnh báo,\n  incident_alerts:online && flow.get(\"invalidTelemetry\") !== true ? {  /// cảnh báo sự cố (chỉ khi online):\n    manual_idle:flow.get(\"manualIdleAlert\") === true,after_hours:flow.get(\"afterHoursAlert\") === true  /// đèn bật tay khi kho vắng, chuyển động ngoài ca,\n  } : {manual_idle:false,after_hours:false},\n  rule:{enabled:flow.get(\"ruleEnabled\") === true,idle_seconds:flow.get(\"ruleIdleSeconds\") || 30,  /// trạng thái quy tắc kho vắng: bật/tắt, ngưỡng,\n    remaining_ms:online && begin != null && !flow.get(\"ruleFired\") ? Math.max(0,(flow.get(\"ruleIdleSeconds\") || 30)*1000-(now-begin)) : null},  /// thời gian còn lại trước khi gửi AUTO,\n  commands:flow.get(\"commands\") || [],events:flow.get(\"journal\") || [],samples:flow.get(\"samples\") || [],  /// 20 lệnh gần nhất (kèm ACK, RTT), 100 sự kiện gần nhất, 60 mẫu biểu đồ,\n  storage:store && typeof store.stats === \"function\" ? store.stats() : {available:false,error:\"not_configured\"},  /// trạng thái CSDL: số dòng trạng thái, số sự kiện, lỗi gần nhất,\n  telegram:telegram && typeof telegram.status === \"function\" ? telegram.status() : {enabled:false,chats:0}  /// trạng thái Telegram: bật/tắt, số chat được phép, số tin đã gửi/nhận.\n};\nreturn msg;  /// → http response.\n/// ▲ http-state.js: GET /dt45/api/state – dữ liệu duy nhất mà dashboard cần để vẽ giao diện.\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "api-response"
+      ]
+    ]
+  },
+  {
+    "id": "api-command-in",
+    "type": "http in",
+    "z": "dt45-week45",
+    "name": "POST /dt45/api/command",
+    "x": 160,
+    "y": 1200,
+    "url": "/dt45/api/command",
+    "method": "post",
+    "upload": false,
+    "swaggerDoc": "",
+    "wires": [
+      [
+        "http-auth"
+      ]
+    ]
+  },
+  {
+    "id": "api-rule-in",
+    "type": "http in",
+    "z": "dt45-week45",
+    "name": "POST /dt45/api/rule",
+    "x": 160,
+    "y": 1270,
+    "url": "/dt45/api/rule",
+    "method": "post",
+    "upload": false,
+    "swaggerDoc": "",
+    "wires": [
+      [
+        "http-auth"
+      ]
+    ]
+  },
+  {
+    "id": "api-alerts-in",
+    "type": "http in",
+    "z": "dt45-week45",
+    "name": "POST /dt45/api/alerts",
+    "x": 160,
+    "y": 1320,
+    "url": "/dt45/api/alerts",
+    "method": "post",
+    "upload": false,
+    "swaggerDoc": "",
+    "wires": [
+      [
+        "http-auth"
+      ]
+    ]
+  },
+  {
+    "id": "http-auth",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Quyen xem / dieu khien",
+    "x": 500,
+    "y": 1220,
+    "func": "const expected = env.get(\"DT45_CONTROL_TOKEN\");  /// Mã điều khiển của phiên, do start.ps1 sinh ngẫu nhiên (GUID) mỗi lần chạy.\nconst token = msg.req?.headers?.[\"x-dt45-token\"];  /// Mã người dùng gửi trong header x-dt45-token.\nfunction fail(status,reason) {  /// Trả lỗi HTTP ra cổng 3 (http response).\n  return [null,null,{...msg,statusCode:status,headers:{\"Content-Type\":\"application/json\",\"Cache-Control\":\"no-store\"},payload:{accepted:false,reason}}];  /// JSON {accepted:false, reason}; Cache-Control: no-store để trình duyệt không lưu.\n}\nif (!expected) return fail(503,\"control_not_configured\");  /// Chưa cấu hình mã (không chạy bằng start.ps1) → 503.\nif (typeof token !== \"string\" || token !== expected) return fail(403,\"operator_required\");  /// Thiếu hoặc sai mã → 403: người chỉ xem không được điều khiển.\nif (!msg.payload || typeof msg.payload !== \"object\" || Array.isArray(msg.payload)) return fail(400,\"invalid_body\");  /// Body phải là đối tượng JSON.\nif (msg.req.url.split(\"?\")[0].endsWith(\"/alerts\")) return [null,null,null,msg];  /// POST /dt45/api/alerts → cổng 4 (settings.js).\nif (msg.req.url.split(\"?\")[0].endsWith(\"/rule\")) {  /// POST /dt45/api/rule:\n  if (typeof msg.payload.enabled !== \"boolean\" || !Number.isInteger(msg.payload.idle_seconds) ||  /// enabled phải là true/false và idle_seconds là số nguyên\n      msg.payload.idle_seconds < 15 || msg.payload.idle_seconds > 300) return fail(400,\"invalid_rule_config\");  /// trong khoảng 15–300 giây.\n  msg.idleSeconds = msg.payload.idle_seconds;  /// Chuyển sang định dạng mà rule.js đọc.\n  msg.payload = msg.payload.enabled;  /// payload = bật/tắt.\n  msg.kind = \"rule_config\";  /// Đánh dấu là lệnh cấu hình rule.\n  return [null,msg,null];  /// → cổng 2 (rule.js).\n}\nif (typeof msg.payload.command !== \"string\") return fail(400,\"invalid_command\");  /// POST /dt45/api/command: body phải có command dạng chuỗi.\nmsg.payload = msg.payload.command;  /// Chỉ giữ tên lệnh.\nmsg.source = \"dashboard\";  /// Ghi nguồn 'dashboard' để nhật ký và CSDL phân biệt với Telegram.\nreturn [msg,null,null];  /// → cổng 1 (command.js).\n/// ▲ http-auth.js: kiểm tra quyền và định dạng của mọi API ghi; sai mã → 403, sai dữ liệu → 400.\n///   4 cổng ra: [command] [rule] [HTTP response lỗi] [settings cảnh báo].\n",
+    "outputs": 4,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "command"
+      ],
+      [
+        "rule"
+      ],
+      [
+        "api-response"
+      ],
+      [
+        "settings"
+      ]
+    ]
+  },
+  {
+    "id": "settings",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Cau hinh canh bao / ca lam viec",
+    "x": 820,
+    "y": 1290,
+    "func": "const p = msg.payload;  /// Body của POST /dt45/api/alerts (đã qua http-auth).\nconst clock = value => typeof value === \"string\" && /^([01]\\d|2[0-3]):[0-5]\\d$/.test(value);  /// Kiểm tra giờ dạng HH:MM 24 giờ.\nconst valid = p && Number.isInteger(p.pir_high_seconds) && p.pir_high_seconds >= 5 && p.pir_high_seconds <= 3600 &&  /// PIR HIGH: số nguyên 5–3600 giây,\n  Number.isInteger(p.manual_idle_seconds) && p.manual_idle_seconds >= 15 && p.manual_idle_seconds <= 300 &&  /// kho vắng: số nguyên 15–300 giây,\n  typeof p.shift_enabled === \"boolean\" && clock(p.shift_start) && clock(p.shift_end) && p.shift_start !== p.shift_end;  /// bật/tắt ngoài ca là boolean, giờ bắt đầu/kết thúc hợp lệ và khác nhau.\nconst response = (status,payload) => ({...msg,statusCode:status,  /// Tạo phản hồi HTTP JSON\n  headers:{\"Content-Type\":\"application/json\",\"Cache-Control\":\"no-store\"},payload});  /// không lưu cache.\nif (!valid) return [null,response(400,{accepted:false,reason:\"invalid_alert_config\"})];  /// Sai → HTTP 400, không đổi cấu hình.\n// Chi luu cac truong da kiem tra, khong cho body ghi de flow context tuy y.\nconst config = {pir_high_seconds:p.pir_high_seconds,manual_idle_seconds:p.manual_idle_seconds,  /// Chỉ chép các trường đã kiểm tra:\n  shift_enabled:p.shift_enabled,shift_start:p.shift_start,shift_end:p.shift_end};  /// body không thể ghi đè dữ liệu khác trong flow context.\nflow.set(\"alertConfig\",config);  /// Lưu cấu hình cảnh báo (monitor.js và http-state.js đọc).\nflow.set(\"pirHighSince\",{});  /// Đặt lại các bộ đếm để ngưỡng mới áp dụng từ đầu:\nflow.set(\"sensorAlerts\",{});\nflow.set(\"manualIdleSince\",null);\nflow.set(\"manualIdleAlert\",false);\nflow.set(\"afterHoursAlert\",false);\nreturn [{payload:{type:\"alert_config\",...config}},response(200,{accepted:true,...config})];  /// Cổng 1 → nhật ký alert_config; cổng 2 → HTTP 200.\n/// ▲ settings.js: lưu cấu hình cảnh báo & ca làm việc; cấu hình chỉ tồn tại trong phiên Node-RED.\n",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "history"
+      ],
+      [
+        "api-response"
+      ]
+    ]
+  },
+  {
+    "id": "api-response",
+    "type": "http response",
+    "z": "dt45-week45",
+    "name": "JSON response",
+    "x": 820,
+    "y": 1160,
+    "statusCode": "",
+    "headers": {},
+    "wires": []
+  },
+  {
+    "id": "watchdog-tick",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "Kiem tra live / ACK moi 1s",
+    "x": 170,
+    "y": 1370,
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "1",
+    "crontab": "",
+    "once": true,
+    "onceDelay": 0.5,
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "wires": [
+      [
+        "monitor"
+      ]
+    ]
+  },
+  {
+    "id": "monitor",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Canh bao offline / ACK 12s",
+    "x": 510,
+    "y": 1370,
+    "func": "const configuredLiveMs = Number(env.get(\"DT45_LIVE_WINDOW_MS\"));  /// Biến môi trường DT45_LIVE_WINDOW_MS (nếu có) để đổi cửa sổ 'dữ liệu trực tiếp'.\n// Wokwi thuong chay cham hon thoi gian thuc (15-60%): heartbeat 2s mo phong co the cach nhau 5-13s thuc.\nconst LIVE_WINDOW_MS = Number.isInteger(configuredLiveMs) && configuredLiveMs >= 3000 ? configuredLiveMs : 15000;  /// Cửa sổ dữ liệu trực tiếp: hợp lệ nếu là số nguyên ≥ 3000 ms, nếu không dùng mặc định 15 000 ms.\nconst now = Date.now(), lastAt = flow.get(\"lastTelemetryAt\");  /// Thời điểm hiện tại và lần nhận telemetry trực tiếp gần nhất.\nconst online = flow.get(\"deviceOnline\") === true && lastAt != null && now-lastAt <= LIVE_WINDOW_MS;  /// Online khi có telemetry trực tiếp trong 15 s.\nconst previous = flow.get(\"monitorOnline\");  /// Trạng thái online ở lần chạy trước (để phát hiện thời điểm đổi).\nconst events = [];  /// Danh sách sự kiện sẽ gửi ra nhật ký.\nif (!online && flow.get(\"deviceOnline\") === true) {  /// Vừa quá 15 s không có dữ liệu mà vẫn đang ghi online →\n  flow.set(\"deviceOnline\",false);  /// chuyển sang offline (dashboard khóa nút),\n  flow.set(\"connectionReason\",\"heartbeat_timeout\");  /// lý do: heartbeat_timeout,\n  flow.set(\"ruleBegin\",null);  /// hủy đếm kho vắng,\n  flow.set(\"ruleLastAt\",null);  /// xóa mốc rule,\n  flow.set(\"ruleFired\",false);  /// cho phép rule chạy lại.\n}\nif (previous === true && !online) events.push({payload:{type:\"alert\",code:\"DEVICE_OFFLINE\",severity:\"warning\",reason:flow.get(\"connectionReason\") || \"heartbeat_timeout\"}});  /// online → offline: cảnh báo DEVICE_OFFLINE (một lần cho mỗi lần mất).\nif (previous === false && online) events.push({payload:{type:\"recovery\",code:\"DEVICE_ONLINE\"}});  /// offline → online: sự kiện phục hồi DEVICE_ONLINE.\nflow.set(\"monitorOnline\",online);  /// Nhớ trạng thái cho lần chạy sau.\nconst commands = flow.get(\"commands\") || [];  /// Lệnh đang theo dõi ACK.\nconst configuredHighMs = Number(env.get(\"DT45_PIR_HIGH_MS\"));  /// Ngưỡng PIR HIGH lâu có thể đặt bằng DT45_PIR_HIGH_MS (dùng trong test E2E: 2 s).\nconst config = flow.get(\"alertConfig\") || {pir_high_seconds:  /// Cấu hình cảnh báo hiện tại hoặc mặc định:\n  Number.isInteger(configuredHighMs) && configuredHighMs >= 1000 ? configuredHighMs/1000 : 120,  /// PIR HIGH 120 s,\n  manual_idle_seconds:60,shift_enabled:false,shift_start:\"08:00\",shift_end:\"17:00\"};  /// đèn bật tay khi kho vắng 60 s, ngoài ca tắt, ca 08:00–17:00.\nconst highMs = config.pir_high_seconds * 1000;  /// Ngưỡng PIR HIGH tính bằng ms.\nconst highSince = flow.get(\"pirHighSince\") || {};  /// Mốc PIR bắt đầu HIGH của từng vùng (validate.js ghi).\nconst sensorAlerts = flow.get(\"sensorAlerts\") || {};  /// Các vùng đang cảnh báo PIR.\nif (!online) {  /// Offline → xóa mọi bộ đếm để không tính nhầm thời gian mất kết nối:\n  flow.set(\"pirHighSince\",{});\n  flow.set(\"sensorAlerts\",{});\n  flow.set(\"manualIdleSince\",null);\n  flow.set(\"manualIdleAlert\",false);\n  flow.set(\"afterHoursAlert\",false);\n} else if (flow.get(\"invalidTelemetry\") !== true) {  /// Online và dữ liệu hợp lệ → kiểm tra PIR từng vùng:\n  for (const id of [1,2,3]) {  /// vùng 1, 2, 3:\n    if (highSince[id] != null && now-highSince[id] >= highMs) {  /// PIR HIGH liên tục quá ngưỡng (có thể bị che/bụi hoặc có người làm việc liên tục) →\n      if (!sensorAlerts[id]) events.push({payload:{type:\"alert\",code:\"PIR_HIGH_LONG\",zone:id,high_seconds:Math.floor(highMs/1000),severity:\"warning\"}});  /// cảnh báo PIR_HIGH_LONG một lần (không tự tắt đèn),\n      sensorAlerts[id] = true;  /// đánh dấu đã cảnh báo.\n    } else if (sensorAlerts[id] && highSince[id] == null) {  /// PIR đã về LOW sau khi cảnh báo →\n      events.push({payload:{type:\"recovery\",code:\"PIR_HIGH_CLEARED\",zone:id}});  /// sự kiện phục hồi,\n      delete sensorAlerts[id];  /// bỏ đánh dấu.\n    }\n  }\n  flow.set(\"sensorAlerts\",sensorAlerts);  /// Lưu danh sách vùng đang cảnh báo.\n}\nif (online && flow.get(\"invalidTelemetry\") !== true) {  /// Online và dữ liệu hợp lệ:\n  const idleSince = flow.get(\"manualIdleSince\");  /// mốc bắt đầu 'kho vắng mà có đèn bật tay',\n  const idleAlert = idleSince != null && now-idleSince >= config.manual_idle_seconds*1000;  /// kéo dài quá ngưỡng (mặc định 60 s)?\n  if (idleAlert && !flow.get(\"manualIdleAlert\")) events.push({payload:{type:\"alert\",code:\"MANUAL_LIGHT_IDLE\",severity:\"warning\",idle_seconds:config.manual_idle_seconds}});  /// Có → cảnh báo MANUAL_LIGHT_IDLE một lần.\n  if (!idleAlert && flow.get(\"manualIdleAlert\")) events.push({payload:{type:\"recovery\",code:\"MANUAL_IDLE_CLEARED\"}});  /// Hết điều kiện → phục hồi.\n  flow.set(\"manualIdleAlert\",idleAlert);  /// Lưu trạng thái cảnh báo.\n  // Gio Viet Nam UTC+7, khong phu thuoc timezone may chay Node-RED; ho tro ca qua dem.\n  const minute = Math.floor((now + 7*3600000)/60000) % 1440;  /// Phút hiện tại trong ngày theo giờ Việt Nam (UTC+7), không phụ thuộc múi giờ của máy.\n  const toMinute = text => Number(text.slice(0,2))*60 + Number(text.slice(3));  /// 'HH:MM' → số phút trong ngày.\n  const start = toMinute(config.shift_start), end = toMinute(config.shift_end);  /// Giờ bắt đầu và kết thúc ca.\n  const inShift = start < end ? minute >= start && minute < end : minute >= start || minute < end;  /// Trong ca? Ca thường: start ≤ phút < end; ca qua đêm (22:00–06:00): phút ≥ start hoặc < end.\n  const motion = (flow.get(\"telemetry\")?.zones || []).some(z => z.motion);  /// Có vùng nào đang có chuyển động không.\n  const afterHours = config.shift_enabled && !inShift && motion;  /// Ngoài ca + có chuyển động + đã bật tính năng.\n  if (afterHours && !flow.get(\"afterHoursAlert\")) events.push({payload:{type:\"alert\",code:\"AFTER_HOURS_MOTION\",severity:\"warning\"}});  /// Có → cảnh báo AFTER_HOURS_MOTION (chỉ cảnh báo, chưa kết luận xâm nhập).\n  if (!afterHours && flow.get(\"afterHoursAlert\")) events.push({payload:{type:\"recovery\",code:\"AFTER_HOURS_CLEARED\"}});  /// Hết → phục hồi.\n  flow.set(\"afterHoursAlert\",afterHours);  /// Lưu trạng thái.\n}\nfor (const c of commands) {  /// Kiểm tra lệnh thiếu ACK:\n  if (c.status === \"waiting\" && now-c.sent_at >= 12000) {  /// đã gửi quá 12 s mà vẫn 'waiting' →\n    c.status = \"timeout\";  /// đánh dấu timeout (dashboard báo 'Chưa có xác nhận sau 12 giây'),\n    events.push({payload:{type:\"alert\",code:\"COMMAND_TIMEOUT\",id:c.id,command:c.command,severity:\"warning\"}});  /// cảnh báo COMMAND_TIMEOUT – không bao giờ tuyên bố thành công khi chưa có ACK.\n  }\n}\nflow.set(\"commands\",commands);  /// Lưu trạng thái lệnh.\nnode.status({fill:online ? \"green\" : \"red\",shape:\"dot\",text:online ? \"Live\" : \"Waiting / offline\"});  /// Chấm Live/offline dưới node.\nreturn events.length ? [events] : null;  /// Gửi tất cả sự kiện (nếu có) ra history trong một lần.\n/// ▲ monitor.js: chạy MỖI GIÂY (node inject 'watchdog-tick'). Phát hiện: mất dữ liệu > 15 s, lệnh thiếu ACK > 12 s,\n///   PIR HIGH quá lâu, đèn bật tay khi kho vắng, chuyển động ngoài ca. Mỗi cảnh báo chỉ ghi 1 lần và có sự kiện phục hồi.\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "history"
+      ]
+    ]
+  },
+  {
+    "id": "storage-comment",
+    "type": "comment",
+    "z": "dt45-week45",
+    "name": "5. CSDL SQLite: lich su trang thai + su kien",
+    "x": 1250,
+    "y": 560,
+    "info": "File node-red/data/dt45.sqlite (doi bang DT45_DB_FILE). Bang telemetry_log: trang thai tung vung, ghi khi doi hoac moi 10s (DT45_DB_SAMPLE_MS). Bang event_log: lenh, ACK, canh bao, phuc hoi, rule. Xem lai: GET /dt45/api/history?kind=telemetry|events|usage&hours=24&zone=1&format=csv.",
+    "wires": []
+  },
+  {
+    "id": "db-telemetry",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Ghi trang thai vao CSDL",
+    "x": 900,
+    "y": 130,
+    "func": "// Ghi trang thai 3 vung vao CSDL SQLite (bang telemetry_log).\n// Chi ghi telemetry LIVE; ban tin retained cu khong duoc ghi de tranh sai lich su.\nif (!msg.live) return null;  /// Bản tin retained cũ → không ghi vào lịch sử.\nconst store = global.get(\"dt45db\");  /// Lấy đối tượng CSDL tạo trong settings.js.\nif (!store || !store.available) {  /// CSDL không dùng được (Node quá cũ, không mở được file) →\n  node.status({fill:\"grey\",shape:\"ring\",text:\"CSDL tat\"});  /// chỉ báo xám dưới node, hệ thống vẫn chạy bình thường.\n  return null;\n}\ntry {  /// Lỗi ghi CSDL không được làm hỏng luồng chính:\n  if (store.saveTelemetry(msg.payload)) {  /// ghi khi trạng thái đổi hoặc mỗi 10 s (store tự quyết định),\n    node.status({fill:\"green\",shape:\"dot\",text:\"CSDL: \"+store.stats().telemetry_rows+\" dong trang thai\"});  /// hiển thị số dòng đã lưu.\n  }\n} catch (e) {\n  node.status({fill:\"red\",shape:\"ring\",text:\"CSDL loi\"});  /// Báo đỏ,\n  node.warn(\"Khong ghi duoc telemetry vao CSDL: \"+e.message);  /// và ghi cảnh báo vào Debug.\n}\nreturn null;  /// Không có cổng ra.\n/// ▲ db-telemetry.js: nối nhánh telemetry hợp lệ (validate.js) vào bảng telemetry_log của SQLite.\n",
+    "outputs": 0,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": []
+  },
+  {
+    "id": "db-event",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Ghi su kien vao CSDL",
+    "x": 1480,
+    "y": 360,
+    "func": "// Ghi moi su kien (lenh, ACK, canh bao, phuc hoi, rule...) vao CSDL SQLite (bang event_log).\n// Dau vao la dong nhat ky do node history tao: {time, topic, event}.\nconst store = global.get(\"dt45db\");  /// Đối tượng CSDL.\nif (!store || !store.available) return null;  /// CSDL tắt → bỏ qua.\nlet record = msg.payload;  /// Dòng nhật ký từ history.js (chuỗi JSON).\nif (typeof record === \"string\") {  /// Đổi lại thành đối tượng;\n  try { record = JSON.parse(record); } catch { return null; }  /// chuỗi hỏng → bỏ qua.\n}\ntry {\n  if (store.saveEvent(record)) node.status({fill:\"green\",shape:\"dot\",text:\"CSDL: \"+store.stats().event_rows+\" su kien\"});  /// Ghi vào event_log và hiển thị số sự kiện đã lưu.\n} catch (e) {\n  node.status({fill:\"red\",shape:\"ring\",text:\"CSDL loi\"});  /// Báo đỏ,\n  node.warn(\"Khong ghi duoc su kien vao CSDL: \"+e.message);  /// và ghi cảnh báo vào Debug.\n}\nreturn null;  /// Không có cổng ra.\n/// ▲ db-event.js: mọi dòng nhật ký (cũng là dòng trong events.jsonl) được lưu thêm vào bảng event_log để truy vấn lại.\n",
+    "outputs": 0,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": []
+  },
+  {
+    "id": "api-history-in",
+    "type": "http in",
+    "z": "dt45-week45",
+    "name": "GET /dt45/api/history",
+    "x": 160,
+    "y": 1440,
+    "url": "/dt45/api/history",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "wires": [
+      [
+        "http-history"
+      ]
+    ]
+  },
+  {
+    "id": "http-history",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Truy van lich su (JSON/CSV)",
+    "x": 500,
+    "y": 1440,
+    "func": "// GET /dt45/api/history?kind=telemetry|events|usage&hours=24&zone=1&type=alert&limit=200&format=csv\n// Chi doc (nguoi xem cung xem duoc). Tra JSON cho dashboard hoac CSV de mo bang Excel.\nconst store = global.get(\"dt45db\");  /// Đối tượng CSDL.\nconst json = (status,payload) => ({...msg,statusCode:status,  /// Tạo phản hồi JSON\n  headers:{\"Content-Type\":\"application/json\",\"Cache-Control\":\"no-store\"},payload});  /// không lưu cache.\nif (!store || !store.available) {  /// CSDL không dùng được →\n  return json(503,{ok:false,reason:\"storage_unavailable\",error:store ? store.error : \"not_configured\"});  /// HTTP 503 kèm lý do.\n}\nconst q = (msg.req && msg.req.query) || {};  /// Tham số trên URL.\nconst kind = q.kind || \"telemetry\";  /// Loại dữ liệu: telemetry (mặc định), events hoặc usage.\nconst hours = q.hours === undefined ? 24 : Number(q.hours);  /// Khoảng thời gian (giờ), mặc định 24.\nconst zone = q.zone === undefined || q.zone === \"\" || q.zone === \"all\" ? null : Number(q.zone);  /// Vùng 1–3, hoặc null = tất cả.\nconst limit = q.limit === undefined ? 200 : Number(q.limit);  /// Số dòng tối đa, mặc định 200.\nconst type = q.type === undefined || q.type === \"\" ? undefined : String(q.type);  /// Lọc loại sự kiện (alert, command...).\nif (![\"telemetry\",\"events\",\"usage\"].includes(kind) || !Number.isInteger(hours) || hours < 1 || hours > 720 ||  /// KIỂM TRA THAM SỐ: kind hợp lệ, hours 1–720 (30 ngày),\n    (zone !== null && ![1,2,3].includes(zone)) || !Number.isInteger(limit) || limit < 1 || limit > 2000 ||  /// zone 1–3, limit 1–2000,\n    (type !== undefined && !/^[a-z_]{1,32}$/.test(type)) || (q.format !== undefined && ![\"json\",\"csv\"].includes(q.format))) {  /// type chỉ gồm chữ thường và '_' (không thể chèn SQL), format json/csv.\n  return json(400,{ok:false,reason:\"invalid_history_query\"});  /// Sai → HTTP 400.\n}\nconst to = Date.now(), from = to - hours*3600000;  /// Khoảng thời gian truy vấn [from, to] tính bằng ms.\nconst options = {from,to,limit,type,zone:zone === null ? undefined : zone};  /// Tham số truyền cho store.\nconst COLUMNS = {  /// Cột của file CSV cho từng loại (tiêu đề không dấu để Excel nào cũng đọc được):\n  telemetry:[[\"ts_vn\",\"Gio Viet Nam\"],[\"zone_id\",\"Vung\"],[\"pir\",\"PIR\"],[\"motion\",\"Chuyen dong\"],[\"led\",\"Den\"],  /// trạng thái vùng:\n    [\"mode\",\"Che do\"],[\"on_ms\",\"Thoi gian sang (ms)\"],[\"timeout_ms\",\"Thoi gian giu (ms)\"],[\"device\",\"Thiet bi\"],[\"uptime_ms\",\"Uptime (ms)\"]],\n  events:[[\"ts_vn\",\"Gio Viet Nam\"],[\"type\",\"Loai\"],[\"code\",\"Ma\"],[\"zone_id\",\"Vung\"],[\"command\",\"Lenh\"],[\"cmd_id\",\"ID lenh\"],  /// sự kiện:\n    [\"result\",\"Ket qua\"],[\"reason\",\"Ly do\"],[\"source\",\"Nguon\"],[\"detail\",\"Chi tiet JSON\"]],\n  usage:[[\"day\",\"Ngay (gio VN)\"],[\"zone_id\",\"Vung\"],[\"on_seconds\",\"Thoi gian sang (giay)\"],[\"samples\",\"So mau\"]]  /// thời gian sáng theo ngày.\n};\nlet rows;\ntry {  /// Truy vấn CSDL bằng câu lệnh tham số hóa (prepared statement):\n  rows = kind === \"telemetry\" ? store.queryTelemetry(options) :  /// trạng thái vùng,\n    kind === \"events\" ? store.queryEvents(options) : store.usageByDay(options);  /// sự kiện, hoặc thời gian sáng theo ngày.\n} catch (e) {\n  return json(500,{ok:false,reason:\"storage_error\",error:e.message});  /// Lỗi CSDL → HTTP 500.\n}\nif (q.format === \"csv\") {  /// Yêu cầu CSV →\n  const columns = COLUMNS[kind].map(([key,label]) => ({key,label}));  /// danh sách cột,\n  return {...msg,statusCode:200,payload:store.toCsv(rows,columns),headers:{\"Content-Type\":\"text/csv; charset=utf-8\",  /// nội dung CSV (có BOM cho Excel),\n    \"Content-Disposition\":`attachment; filename=\"nhom08-${kind}-${hours}h.csv\"`,\"Cache-Control\":\"no-store\"}};  /// tải về với tên nhom08-<loại>-<giờ>h.csv.\n}\nreturn json(200,{ok:true,kind,hours,zone,from,to,count:rows.length,rows,storage:store.stats()});  /// JSON cho dashboard: số dòng, dữ liệu và thống kê CSDL.\n/// ▲ http-history.js: GET /dt45/api/history – chỉ đọc nên người xem cũng dùng được; mọi tham số đều được kiểm tra trước khi truy vấn.\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "api-response"
+      ]
+    ]
+  },
+  {
+    "id": "telegram-comment",
+    "type": "comment",
+    "z": "dt45-week45",
+    "name": "6. Telegram Bot: canh bao + lenh /status /on1 /auto",
+    "x": 1250,
+    "y": 640,
+    "info": "Bat khi co DT45_TELEGRAM_TOKEN (dat trong node-red/telegram.local.ps1). Chi chat trong DT45_TELEGRAM_CHAT_ID duoc dieu khien. Lenh Telegram di qua node command: van kiem tra live telemetry, tao ID va cho ACK nhu dashboard.",
+    "wires": []
+  },
+  {
+    "id": "telegram-tick",
+    "type": "inject",
+    "z": "dt45-week45",
+    "name": "Lay tin Telegram moi 3s",
+    "x": 170,
+    "y": 1510,
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "3",
+    "crontab": "",
+    "once": true,
+    "onceDelay": 2,
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "wires": [
+      [
+        "telegram-in"
+      ]
+    ]
+  },
+  {
+    "id": "telegram-in",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Nhan lenh Telegram",
+    "x": 510,
+    "y": 1510,
+    "func": "// Moi 3 giay lay tin nhan Telegram moi. Chi chat co trong DT45_TELEGRAM_CHAT_ID moi duoc dieu khien.\n// Lenh hop le di vao node \"command\" (cung kiem tra live telemetry, tao ID, cho ACK nhu dashboard).\nconst tg = global.get(\"dt45tg\");  /// Đối tượng Telegram tạo trong settings.js.\nif (!tg || !tg.enabled) {  /// Chưa có token →\n  node.status({fill:\"grey\",shape:\"ring\",text:\"Telegram tat (chua co token)\"});  /// báo xám, không gọi Internet.\n  return null;\n}\nconst configuredLiveMs = Number(env.get(\"DT45_LIVE_WINDOW_MS\"));  /// Biến môi trường DT45_LIVE_WINDOW_MS (nếu có) để đổi cửa sổ 'dữ liệu trực tiếp'.\nconst LIVE_WINDOW_MS = Number.isInteger(configuredLiveMs) && configuredLiveMs >= 3000 ? configuredLiveMs : 15000;  /// Cửa sổ dữ liệu trực tiếp: hợp lệ nếu là số nguyên ≥ 3000 ms, nếu không dùng mặc định 15 000 ms.\nfunction statusText() {  /// Tạo nội dung trả lời lệnh /status:\n  const p = flow.get(\"telemetry\"), lastAt = flow.get(\"lastTelemetryAt\");  /// telemetry và lần nhận gần nhất,\n  if (!p || !Array.isArray(p.zones)) return \"Chưa nhận dữ liệu từ ESP32.\";  /// chưa có dữ liệu,\n  const online = flow.get(\"deviceOnline\") === true && lastAt != null && Date.now()-lastAt <= LIVE_WINDOW_MS;  /// online khi có dữ liệu trực tiếp trong 15 s,\n  const lines = [online ? \"ESP32: trực tuyến\" : \"ESP32: mất kết nối – đây là dữ liệu gần nhất\"];  /// dòng đầu: trạng thái kết nối,\n  for (const z of p.zones) {  /// mỗi vùng một dòng:\n    lines.push(\"Vùng \"+z.id+\": đèn \"+(z.led ? \"BẬT\" : \"tắt\")+\" · \"+(z.mode === \"AUTO\" ? \"Tự động\" : \"Thủ công\")+  /// đèn, chế độ,\n      \" · \"+(z.motion ? \"có chuyển động\" : \"không chuyển động\"));  /// và chuyển động,\n  }\n  lines.push(\"Đèn sáng: \"+p.zones.filter(z => z.led).length+\"/3 · Giữ đèn \"+Math.round(p.timeout_ms/1000)+\" giây\");  /// dòng tổng: số đèn sáng và thời gian giữ.\n  return lines.join(\"\\n\");  /// Ghép thành một tin nhắn.\n}\ntg.poll().then(messages => {  /// Hỏi Telegram có tin mới không (getUpdates, bất đồng bộ):\n  const commands = [], logs = [];  /// lệnh sẽ gửi xuống và sự kiện cần ghi nhật ký,\n  for (const m of messages) {  /// duyệt từng tin:\n    const parsed = tg.parseCommand(m.text);  /// phân tích lệnh (/on1 → ON1, /status, /help...),\n    if (!m.authorized) {  /// chat KHÔNG có trong danh sách được phép →\n      tg.send(\"Chat ID \"+m.chatId+\" chưa được cấp quyền. Thêm số này vào DT45_TELEGRAM_CHAT_ID rồi chạy lại Node-RED.\",m.chatId);  /// trả lời kèm Chat ID để người quản trị thêm vào cấu hình,\n      logs.push({payload:{type:\"telegram\",action:\"unauthorized\",command:parsed.command || null}});  /// ghi nhật ký lần thử trái phép,\n      continue;  /// không thực hiện.\n    }\n    if (parsed.kind === \"help\") tg.send(tg.helpText,m.chatId);  /// /help hoặc /start → danh sách lệnh,\n    else if (parsed.kind === \"status\") tg.send(statusText(),m.chatId);  /// /status → trạng thái 3 vùng,\n    else if (parsed.kind === \"command\") commands.push({payload:parsed.command,source:\"telegram\"});  /// lệnh điều khiển → chuyển sang command.js với nguồn 'telegram',\n    else tg.send(\"Lệnh không hợp lệ. Gõ /help để xem danh sách lệnh.\",m.chatId);  /// khác → báo lệnh không hợp lệ.\n  }\n  const st = tg.status();  /// Thống kê của bot.\n  node.status(st.last_error ? {fill:\"red\",shape:\"ring\",text:\"Telegram loi: \"+String(st.last_error).slice(0,40)} :  /// Có lỗi → chấm đỏ kèm lỗi rút gọn (không bao giờ chứa token),\n    {fill:\"green\",shape:\"dot\",text:\"Telegram: \"+st.received+\" tin, \"+st.sent+\" da gui\"});  /// không lỗi → chấm xanh với số tin nhận/gửi.\n  if (commands.length || logs.length) node.send([commands.length ? commands : null,logs.length ? logs : null]);  /// Gửi bất đồng bộ: cổng 1 → command.js, cổng 2 → history.\n  node.done();  /// Báo Node-RED đã xử lý xong lần chạy này.\n}).catch(e => {  /// Lỗi ngoài dự kiến →\n  node.status({fill:\"red\",shape:\"ring\",text:\"Telegram loi\"});  /// báo đỏ,\n  node.done();  /// vẫn kết thúc lần chạy.\n});\nreturn null;  /// Không trả gì đồng bộ – kết quả gửi qua node.send() ở trên.\n/// ▲ telegram-in.js: chạy mỗi 3 s (node inject 'telegram-tick'). Dùng long-polling getUpdates nên không cần webhook hay IP public.\n///   Lệnh Telegram đi qua CÙNG cổng kiểm soát command.js như dashboard: kiểm tra online, tạo ID, QoS 1, chờ ACK.\n",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": [
+      [
+        "command"
+      ],
+      [
+        "history"
+      ]
+    ]
+  },
+  {
+    "id": "telegram-notify",
+    "type": "function",
+    "z": "dt45-week45",
+    "name": "Gui canh bao Telegram",
+    "x": 1480,
+    "y": 430,
+    "func": "// Gui canh bao / phuc hoi / rule tu dong va ket qua lenh Telegram toi cac chat duoc phep.\n// Dau vao la dong nhat ky do node history tao: {time, topic, event}.\nconst tg = global.get(\"dt45tg\");  /// Đối tượng Telegram.\nif (!tg || !tg.enabled) return null;  /// Chưa có token → không gửi.\nlet record = msg.payload;  /// Dòng nhật ký từ history.js.\nif (typeof record === \"string\") {  /// Đổi chuỗi JSON thành đối tượng;\n  try { record = JSON.parse(record); } catch { return null; }  /// hỏng → bỏ qua.\n}\nconst e = record && record.event;  /// Nội dung sự kiện.\nif (!e || typeof e !== \"object\") return null;  /// Không có → bỏ qua.\nconst reasons = {no_live_telemetry:\"ESP32 đang offline hoặc chưa có dữ liệu trực tiếp\",  /// Diễn giải lý do từ chối lệnh sang tiếng Việt:\n  invalid_telemetry:\"dữ liệu ESP32 sai định dạng\",invalid_command:\"lệnh không hợp lệ\"};\nlet text = null;  /// Tin nhắn sẽ gửi (null = sự kiện này không cần báo).\nif (e.type === \"alert\") {  /// Cảnh báo:\n  text = e.code === \"DEVICE_OFFLINE\" ? \"[CẢNH BÁO] Mất dữ liệu từ ESP32. Dashboard đã khóa nút điều khiển.\" :  /// mất dữ liệu ESP32,\n    e.code === \"PIR_HIGH_LONG\" ? \"[CẢNH BÁO] PIR vùng \"+e.zone+\" giữ HIGH quá \"+e.high_seconds+\" giây – kiểm tra cảm biến.\" :  /// PIR giữ HIGH quá lâu,\n    e.code === \"MANUAL_LIGHT_IDLE\" ? \"[CẢNH BÁO] Có đèn bật thủ công khi kho vắng quá \"+e.idle_seconds+\" giây.\" :  /// đèn bật tay khi kho vắng,\n    e.code === \"AFTER_HOURS_MOTION\" ? \"[CẢNH BÁO] Có chuyển động ngoài ca làm việc.\" :  /// chuyển động ngoài ca,\n    e.code === \"COMMAND_TIMEOUT\" ? \"[CẢNH BÁO] Lệnh \"+e.command+\" chưa được ESP32 xác nhận sau 12 giây.\" :  /// lệnh thiếu ACK,\n    \"[CẢNH BÁO] \"+(e.code || \"Sự kiện bất thường\");  /// loại khác.\n} else if (e.type === \"recovery\") {  /// Phục hồi:\n  text = e.code === \"DEVICE_ONLINE\" ? \"[PHỤC HỒI] ESP32 đã gửi dữ liệu trở lại.\" :  /// ESP32 online trở lại,\n    e.code === \"PIR_HIGH_CLEARED\" ? \"[PHỤC HỒI] PIR vùng \"+e.zone+\" đã trở về LOW.\" :  /// PIR về LOW,\n    e.code === \"MANUAL_IDLE_CLEARED\" ? \"[PHỤC HỒI] Hết tình trạng đèn thủ công sáng khi kho vắng.\" :  /// hết đèn bật tay khi vắng,\n    e.code === \"AFTER_HOURS_CLEARED\" ? \"[PHỤC HỒI] Hết chuyển động ngoài ca.\" : \"[PHỤC HỒI] \"+(e.code || \"\");  /// hết chuyển động ngoài ca.\n} else if (e.type === \"automation\") {  /// Rule tự động gửi AUTO:\n  text = \"[TỰ ĐỘNG] Kho vắng \"+e.idle_seconds+\" giây → Node-RED gửi \"+e.command+\".\";  /// báo cho người quản lý biết hệ thống đã tự trả về tự động.\n} else if (e.type === \"command_sent\" && e.source === \"telegram\") {  /// Lệnh gửi từ Telegram →\n  text = \"Đã gửi lệnh \"+e.command+\" (\"+e.id+\"). Đang chờ ESP32 xác nhận.\";  /// xác nhận đã gửi kèm ID.\n} else if (e.type === \"command_rejected\" && e.source === \"telegram\") {  /// Lệnh Telegram bị từ chối →\n  text = \"Không gửi được \"+e.command+\": \"+(reasons[e.reason] || e.reason)+\".\";  /// báo lý do.\n} else if (e.type === \"command\" && e.id) {  /// ACK từ ESP32:\n  const entry = (flow.get(\"commands\") || []).find(c => c.id === e.id);  /// tìm lệnh tương ứng,\n  if (entry && entry.source === \"telegram\") {  /// chỉ báo cho lệnh có nguồn Telegram (lệnh dashboard không làm phiền điện thoại):\n    text = e.result === \"OK\" ? \"ESP32 đã xác nhận \"+e.command+(entry.rtt_ms != null ? \" · ACK \"+entry.rtt_ms+\" ms\" : \"\")+\".\" :  /// OK kèm thời gian phản hồi ACK,\n      \"ESP32 từ chối \"+(e.command || \"lệnh\")+\": \"+(e.reason || \"không rõ lý do\")+\".\";  /// hoặc lý do ESP32 từ chối.\n  }\n}\nif (!text) return null;  /// Không có gì cần báo.\n// Chong gui lap: cung noi dung trong 5 giay chi gui 1 lan.\nconst now = Date.now();  /// Thời điểm hiện tại.\nif (text === flow.get(\"tgLastText\") && now-(flow.get(\"tgLastAt\") || 0) < 5000) return null;  /// Cùng nội dung trong vòng 5 s → không gửi lại (chống spam khi mạng chập chờn).\nflow.set(\"tgLastText\",text);  /// Nhớ nội dung,\nflow.set(\"tgLastAt\",now);  /// và thời điểm.\ntg.send(text).then(ok => {  /// Gửi tới tất cả chat được phép (bất đồng bộ),\n  node.status(ok ? {fill:\"green\",shape:\"dot\",text:\"Da gui Telegram\"} : {fill:\"red\",shape:\"ring\",text:\"Gui Telegram loi\"});  /// báo kết quả dưới node,\n  node.done();  /// kết thúc lần chạy.\n});\nreturn null;  /// Không có cổng ra.\n/// ▲ telegram-notify.js: nối nhánh nhật ký (history.js) sang Telegram – cảnh báo, phục hồi, rule tự động và kết quả lệnh Telegram.\n",
+    "outputs": 0,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "wires": []
+  },
+  {
+    "id": "dt45-emqx",
+    "type": "mqtt-broker",
+    "name": "EMQX - DT45",
+    "broker": "broker.emqx.io",
+    "port": "1883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "15",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "willMsg": {},
+    "sessionExpiry": ""
+  }
+]

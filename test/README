@@ -1,0 +1,24 @@
+
+Week 3-8 verification (see README.md for current instructions)
+
+Run from the project directory on Windows with MSVC C++ Build Tools:
+  powershell -ExecutionPolicy Bypass -File .\test\run_host_tests.ps1
+
+host/firmware_test.cpp includes the actual src/main.cpp and replaces
+Arduino clock, GPIO, Serial, Wi-Fi and MQTT using the host headers. It runs 31 behavioral
+cases plus 9 MQTT cases (40 total). Build files go into .pio/host-tests-week45. This is a standalone test runner,
+not a PlatformIO Unity suite; do not use `pio test` for these host tests.
+
+Node-RED function/export tests (18 cases):
+  node .\test\node_red_test.cjs
+
+Optional real Node-RED/EMQX integration with a MOCK device and isolated prefix:
+  node .\test\mqtt_integration_test.cjs
+Requires project runtime, Internet and free TCP port 1881.
+
+Week 6-8 dashboard/API/ACK/alert integration (9 checks, MOCK device):
+  node .\test\e2e_week68_test.cjs
+Uses an isolated prefix and requires the same runtime, Internet and port 1881.
+
+These tests do not establish that the Wokwi circuit runs correctly.
+See docs/TUAN_06.md, docs/TUAN_07.md, docs/TUAN_08.md and docs/KIEM_THU_TUAN_06_08.md.
